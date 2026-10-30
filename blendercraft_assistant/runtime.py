@@ -11,6 +11,7 @@ import json
 import logging
 import secrets
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -423,8 +424,6 @@ class _BackgroundStop:
 
 
 def _join_stoppers(timeout: float) -> None:
-    import time
-
     end = time.monotonic() + timeout
     for thread in list(_stoppers):
         thread.join(max(0.0, end - time.monotonic()))
