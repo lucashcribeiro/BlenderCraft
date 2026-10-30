@@ -1,6 +1,7 @@
 """Panel operators (bc.*) and message submission."""
 
 import base64
+from contextlib import nullcontext
 
 import bpy
 from bpy.props import BoolProperty, EnumProperty, StringProperty
@@ -26,7 +27,18 @@ notice = ""
 
 def build_attachments(context) -> tuple[list[dict], list[str]]:
     """Content blocks for the checked attachments, and warnings for those
-    that failed. The checkboxes apply to one message and are cleared."""
+    that failed. The checkboxes apply to one message and are cleared.
+
+    Runs inside the tracker's AI scope: capturing the view (a temporary
+    camera without a UI) is not a manual edit of the scene.
+    """
+    tracker = runtime.tracker
+    scope = tracker.ai_scope() if tracker is not None else nullcontext()
+    with scope:
+        return _build_attachments(context)
+
+
+def _build_attachments(context) -> tuple[list[dict], list[str]]:
     props = context.window_manager.bc
     blocks: list[dict] = []
     warnings: list[str] = []

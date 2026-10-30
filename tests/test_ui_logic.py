@@ -243,6 +243,25 @@ class OperatorsTest(unittest.TestCase):
         self.assertTrue(base64.b64decode(block["source"]["data"]).startswith(b"\x89PNG"))
         self.assertFalse(self.bc.attach_view)
 
+    def test_attach_view_is_not_a_manual_edit(self):
+        from blendercraft_assistant.undo import ChangeTracker
+
+        self.add_cube("Peca")
+        tracker = ChangeTracker()
+        patcher = mock.patch.object(self.runtime, "tracker", tracker)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        handlers = bpy.app.handlers.depsgraph_update_post
+        handlers.append(self.runtime._on_depsgraph_update)
+        self.addCleanup(handlers.remove, self.runtime._on_depsgraph_update)
+        tracker.begin_turn()
+        tracker.record_ai_step()  # the agent is mid-turn; the user queues a message
+        self.bc.attach_view = True
+        blocks, _warnings = self.operators.build_attachments(bpy.context)
+        self.assertEqual(len(blocks), 1)
+        # The screenshot (a temporary camera in background mode) is not the user's edit.
+        self.assertTrue(tracker.can_undo_last_turn())
+
     def test_attach_view_failure_is_a_warning(self):
         self.bc.attach_view = True  # empty scene: nothing to render
         blocks, warnings = self.operators.build_attachments(bpy.context)
