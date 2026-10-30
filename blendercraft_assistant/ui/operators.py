@@ -94,6 +94,14 @@ def submit(context, text: str, now: bool = False) -> None:
     runtime.tag_redraw()
 
 
+def _runtime_ready(op) -> bool:
+    """Report and refuse while the runtime is not up (the typed text stays)."""
+    if runtime.ready():
+        return True
+    op.report({"WARNING"}, t("server_off"))
+    return False
+
+
 def _take_input(context) -> str:
     props = context.window_manager.bc
     text = props.input.strip()
@@ -107,6 +115,8 @@ class BC_OT_send(Operator):
     bl_description = t("send")
 
     def execute(self, context):
+        if not _runtime_ready(self):
+            return {"CANCELLED"}
         text = _take_input(context)
         if not text:
             return {"CANCELLED"}
@@ -120,6 +130,8 @@ class BC_OT_send_now(Operator):
     bl_description = t("send_now")
 
     def execute(self, context):
+        if not _runtime_ready(self):
+            return {"CANCELLED"}
         text = _take_input(context)
         if text:
             submit(context, text, now=True)

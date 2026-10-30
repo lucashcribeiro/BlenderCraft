@@ -183,6 +183,11 @@ def tag_redraw() -> None:
                 area.tag_redraw()
 
 
+def ready() -> bool:
+    """True once start() has run: messages can be sent."""
+    return server is not None and store is not None
+
+
 def mcp_command() -> str:
     """Command that registers this server with an external Claude Code."""
     url = server.url if server is not None else ""

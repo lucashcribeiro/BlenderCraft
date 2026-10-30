@@ -32,14 +32,18 @@ def _on_input(self, context):
     text = self.input.strip()
     if not text:
         return
+    from . import operators
+
+    if not runtime.ready():  # keep the text so it can be sent later
+        operators.notice = t("server_off")
+        runtime.tag_redraw()
+        return
     _clearing_input = True
     try:
         self.input = ""
     finally:
         _clearing_input = False
-    from .operators import submit
-
-    submit(context, text)
+    operators.submit(context, text)
 
 
 def _on_mode(self, context):

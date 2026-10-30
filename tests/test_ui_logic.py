@@ -187,9 +187,16 @@ class OperatorsTest(unittest.TestCase):
         self.addCleanup(operators.unregister)
         self.bc = bpy.context.window_manager.bc
         self.session = FakeSession()
-        patcher = mock.patch.object(runtime, "ensure_session", return_value=self.session)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for name, value in (
+            ("ensure_session", mock.Mock(return_value=self.session)),
+            ("server", mock.Mock()),  # the runtime is up
+            ("store", mock.Mock()),
+        ):
+            patcher = mock.patch.object(runtime, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        # WindowManager values outlive re-registration: start from an empty field.
+        self.bc.input = ""
         for obj in list(bpy.data.objects):
             bpy.data.objects.remove(obj, do_unlink=True)
 
@@ -206,6 +213,19 @@ class OperatorsTest(unittest.TestCase):
         self.assertEqual(self.bc.input, "")
         self.bc.input = "   "
         self.assertEqual(len(self.session.sent), 1)
+
+    def test_send_before_runtime_is_up_keeps_text(self):
+        with mock.patch.object(self.runtime, "server", None):
+            self.bc.input = "crie um cubo"  # Enter
+            self.assertEqual(self.bc.input, "crie um cubo")
+            self.assertEqual(self.operators.notice, i18n.t("server_off"))
+            self.assertEqual(bpy.ops.bc.send(), {"CANCELLED"})
+            self.session.queue[:] = [("um", [])]
+            self.assertEqual(bpy.ops.bc.send_now(), {"CANCELLED"})
+        self.assertEqual(self.bc.input, "crie um cubo")
+        self.assertEqual(self.session.sent + self.session.sent_now, [])
+        self.assertEqual(self.session.queue, [("um", [])])
+        self.runtime.ensure_session.assert_not_called()
 
     def test_send_now_promotes_last_queued(self):
         self.session.queue[:] = [("um", []), ("dois", [{"type": "text", "text": "x"}])]
