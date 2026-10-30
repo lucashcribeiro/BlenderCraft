@@ -88,6 +88,8 @@ def print_check(
     obj_name: str, min_wall_mm: float = 0.8, overhang_deg: float = 45.0
 ) -> dict:
     """Thin walls, overhangs and the part below the print bed."""
+    if not (math.isfinite(min_wall_mm) and min_wall_mm > 0.0):
+        raise ValueError("min_wall_mm must be a finite number greater than 0")
     if not 0.0 <= overhang_deg <= 90.0:
         raise ValueError("overhang_deg must be between 0 and 90")
     obj = _get_object(obj_name)
@@ -96,7 +98,8 @@ def print_check(
     try:
         # Rays and overhangs assume outward normals; an inside-out mesh is
         # checked as the solid it describes.
-        if bm.calc_volume(signed=True) < 0:
+        signed_volume = bm.calc_volume(signed=True)
+        if signed_volume < 0:
             bmesh.ops.reverse_faces(bm, faces=bm.faces[:])
             bm.normal_update()
 

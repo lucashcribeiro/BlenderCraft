@@ -281,3 +281,11 @@ class PrintCheckTest(TopologyTestBase):
         result = call_tool("print_check", {"name": "Cube", "overhang_deg": 120})
         self.assertTrue(result.is_error)
         self.assertIn("overhang_deg", result.text)
+
+    def test_invalid_min_wall(self):
+        _make_object("Cube", lambda bm: _cube(bm, 20))
+        for bad in (0, -1, float("nan"), float("inf")):
+            with self.subTest(min_wall_mm=bad):
+                result = call_tool("print_check", {"name": "Cube", "min_wall_mm": bad})
+                self.assertTrue(result.is_error)
+                self.assertIn("min_wall_mm", result.text)
