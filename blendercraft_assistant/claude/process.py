@@ -61,7 +61,7 @@ def find_claude(pref_path: str = "") -> str | None:
     minimal PATH."""
     home = Path(os.path.expanduser("~"))
     candidates = [
-        pref_path,
+        os.path.expanduser(pref_path) if pref_path else "",
         shutil.which("claude"),
         str(home / ".local" / "bin" / "claude"),
         *_SYSTEM_PATHS,

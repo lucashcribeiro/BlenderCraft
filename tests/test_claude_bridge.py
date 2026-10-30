@@ -282,6 +282,15 @@ class FindClaudeTest(unittest.TestCase):
                     str(home / ".local" / "bin" / "claude"),
                 )
 
+    def test_preference_expands_tilde(self):
+        with tempfile.TemporaryDirectory() as home:
+            expected = _executable(Path(home) / "tools" / "claude")
+            env = {"PATH": "", "HOME": home}
+            with mock.patch.dict(os.environ, env), mock.patch.object(
+                process_module, "_SYSTEM_PATHS", ()
+            ):
+                self.assertEqual(find_claude("~/tools/claude"), str(expected))
+
     def test_path_lookup_comes_before_fallbacks(self):
         with tempfile.TemporaryDirectory() as tmp:
             on_path = _executable(Path(tmp) / "bin" / "claude")
