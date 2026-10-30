@@ -180,6 +180,19 @@ class SessionFlowTest(SessionTestBase):
         self.assertEqual(self.conv.messages[1].text, "ok")
         self.assertEqual(session.changes, 0)
 
+    def test_text_after_a_tool_starts_a_new_paragraph(self):
+        session = self.make()
+        session.send("x")
+        session.handle_line(delta_line("Vou criar o cubo."))
+        self.feed_fixture(session, "tool_turn")  # a tool call, then "ok"
+        self.assertEqual(self.conv.messages[1].text, "Vou criar o cubo.\n\nok")
+
+    def test_first_text_block_has_no_leading_break(self):
+        session = self.make()
+        session.send("x")
+        self.feed_fixture(session, "tool_turn")
+        self.assertEqual(self.conv.messages[1].text, "ok")
+
     def test_tool_error_status(self):
         session = self.make()
         session.send("x")

@@ -17,6 +17,7 @@ from typing import Protocol
 from ..conversations import Conversation, ConversationStore, Message, ToolCall
 from .stream import (
     SessionStarted,
+    TextBlockStarted,
     TextDelta,
     ToolFinished,
     ToolStarted,
@@ -108,6 +109,8 @@ class AgentSession:
         self._tool_count = 0  # ToolStarted in the current turn
         self._user_index = 0  # position of the current turn's user message
         self._assistant: Message | None = None
+        # A text block started: its first delta begins a new paragraph.
+        self._new_paragraph = False
         # Current turn's input as Claude receives it (context line included).
         self._pending: tuple[str, list[dict]] = ("", [])
 
@@ -282,7 +285,13 @@ class AgentSession:
             return
         if self.status != WORKING:  # stale output after stop() / an error
             return
-        if isinstance(event, TextDelta):
+        if isinstance(event, TextBlockStarted):
+            self._new_paragraph = True
+        elif isinstance(event, TextDelta):
+            if self._new_paragraph and self._assistant.text and event.text:
+                self._assistant.text += "\n\n"
+            if event.text:
+                self._new_paragraph = False
             self._assistant.text += event.text
         elif isinstance(event, ToolStarted):
             self._tool_started(event)

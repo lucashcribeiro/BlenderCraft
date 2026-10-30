@@ -18,6 +18,7 @@ from blendercraft_assistant.claude.process import (
 )
 from blendercraft_assistant.claude.stream import (
     SessionStarted,
+    TextBlockStarted,
     TextDelta,
     ToolFinished,
     ToolStarted,
@@ -78,6 +79,23 @@ class StreamTest(unittest.TestCase):
         self.assertTrue(text)
         self.assertEqual(text, events[-1].result)
         self.assertFalse(events[-1].is_error)
+
+    def test_text_block_start(self):
+        def start(block_type):
+            return json.dumps(
+                {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": block_type},
+                    },
+                }
+            )
+
+        self.assertEqual(parse_line(start("text")), [TextBlockStarted()])
+        self.assertEqual(parse_line(start("tool_use")), [])
+        self.assertEqual(parse_line(start("thinking")), [])
 
     def test_invalid_line(self):
         self.assertEqual(parse_line("lixo"), [])

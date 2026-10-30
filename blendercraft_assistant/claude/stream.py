@@ -4,6 +4,10 @@ Turns one line of stdout into zero or more events for the UI. The shapes
 follow the recorded fixtures in tests/fixtures (Claude Code 2.1.x):
 
 - system/init                 -> SessionStarted
+- stream_event content_block_start of a text block
+                              -> TextBlockStarted (text blocks of separate
+                                 messages, e.g. around a tool call, are
+                                 separate paragraphs)
 - stream_event text_delta     -> TextDelta (the only source of text; the
                                  complete `assistant` messages repeat it)
 - assistant tool_use blocks   -> ToolStarted (input arrives complete here)
@@ -25,6 +29,11 @@ MCP_PREFIX = "mcp__blendercraft__"
 @dataclass
 class SessionStarted:
     session_id: str
+
+
+@dataclass
+class TextBlockStarted:
+    pass
 
 
 @dataclass
@@ -52,7 +61,9 @@ class TurnFinished:
     result: str
 
 
-Event = SessionStarted | TextDelta | ToolStarted | ToolFinished | TurnFinished
+Event = (
+    SessionStarted | TextBlockStarted | TextDelta | ToolStarted | ToolFinished | TurnFinished
+)
 
 
 def _blocks(message) -> list[dict]:
@@ -100,7 +111,14 @@ def parse_line(line: str) -> list[Event]:
 
     if kind == "stream_event":
         event = data.get("event")
-        if not isinstance(event, dict) or event.get("type") != "content_block_delta":
+        if not isinstance(event, dict):
+            return []
+        if event.get("type") == "content_block_start":
+            block = event.get("content_block")
+            if isinstance(block, dict) and block.get("type") == "text":
+                return [TextBlockStarted()]
+            return []
+        if event.get("type") != "content_block_delta":
             return []
         delta = event.get("delta")
         if (
