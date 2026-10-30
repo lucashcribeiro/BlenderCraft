@@ -19,7 +19,9 @@ def call_tool(
     with scope:
         try:
             result = tool.handler(args)
-        except Exception:  # noqa: BLE001 - reported to the model as an error result
+        # SystemExit is not an Exception; it must not unwind into Blender's
+        # main loop and quit the application.
+        except (Exception, SystemExit):  # noqa: BLE001 - reported as an error result
             result = ToolResult(text=traceback.format_exc(), is_error=True)
         # Pushed even after a failure: the handler may have changed the scene
         # before raising, and the step keeps that change undoable.

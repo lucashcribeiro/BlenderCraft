@@ -76,11 +76,18 @@ def _run_python(args: dict) -> ToolResult:
                 result = eval(value, namespace)  # noqa: S307
                 if result is not None:
                     value_repr = repr(result)
-    except Exception as exc:  # noqa: BLE001 - reported to the model as an error
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - reported as an error
+        # SystemExit (sys.exit(), exit(), quit()) is not an Exception: left
+        # alone it would unwind through the dispatcher and quit Blender.
         text = out.getvalue()
         if text and not text.endswith("\n"):
             text += "\n"
-        return ToolResult(text=f"{text}{_format_error(exc)}", is_error=True)
+        error = _format_error(exc)
+        if isinstance(exc, SystemExit):
+            error += (
+                f"\nSystemExit({exc.code!r}): run_python code must not exit Blender"
+            )
+        return ToolResult(text=f"{text}{error}", is_error=True)
 
     parts = []
     if out.getvalue():

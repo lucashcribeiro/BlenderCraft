@@ -8,7 +8,7 @@ from pathlib import Path
 import bpy
 
 from blendercraft_assistant import tools
-from blendercraft_assistant.tools.base import REGISTRY
+from blendercraft_assistant.tools.base import REGISTRY, Tool, register_tool
 from blendercraft_assistant.tools.dispatch import call_tool
 
 tools.load_all()
@@ -104,6 +104,31 @@ class RunPythonTest(unittest.TestCase):
         self.assertTrue(res.is_error)
         self.assertIn("before", res.text)
         self.assertIn("File \"<run_python>\", line 2", res.text)
+
+    def test_system_exit_is_error(self):
+        for code in ("import sys\nsys.exit(3)", "exit()", "quit()"):
+            res = _run(code)
+            self.assertTrue(res.is_error, code)
+            self.assertIn("SystemExit", res.text)
+            self.assertIn("must not exit Blender", res.text)
+
+    def test_system_exit_code_is_reported(self):
+        res = _run("import sys\nsys.exit(3)")
+        self.assertIn("SystemExit(3)", res.text)
+
+    def test_dispatch_converts_system_exit_from_any_handler(self):
+        def _exits(_args):
+            raise SystemExit(7)
+
+        register_tool(
+            Tool("t_exits", "test", {"type": "object"}, _exits, "read")
+        )
+        try:
+            res = call_tool("t_exits", {})
+        finally:
+            del REGISTRY["t_exits"]
+        self.assertTrue(res.is_error)
+        self.assertIn("SystemExit", res.text)
 
     def test_creates_and_undo(self):
         res = call_tool(
