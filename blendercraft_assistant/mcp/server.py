@@ -120,6 +120,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._send(202)
             return
         headers = {}
+        # Issued for clients that want one; intentionally never validated.
         if message.get("method") == "initialize" and "error" not in reply:
             headers["Mcp-Session-Id"] = secrets.token_hex(16)
         self._send_json(200, reply, headers)
