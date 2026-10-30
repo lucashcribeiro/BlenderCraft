@@ -38,7 +38,8 @@ def _call(name, args):
 
 
 def _handler(approve=None):
-    return McpHandler(lambda: [_tool()], _call, approve)
+    tools = [_tool(n) for n in ("echo", "shot", "fail", "boom")]
+    return McpHandler(lambda: tools, _call, approve)
 
 
 def _rpc(method, params=None, id=1):
@@ -67,7 +68,9 @@ class ProtocolTest(unittest.TestCase):
 
     def test_tools_list_without_approve(self):
         tools = _handler().handle(_rpc("tools/list"))["result"]["tools"]
-        self.assertEqual([t["name"] for t in tools], ["echo"])
+        self.assertEqual(
+            [t["name"] for t in tools], ["echo", "shot", "fail", "boom"]
+        )
         self.assertEqual(
             set(tools[0]), {"name", "description", "inputSchema"}
         )
@@ -75,7 +78,7 @@ class ProtocolTest(unittest.TestCase):
     def test_tools_list_with_approve(self):
         h = _handler(approve=lambda n, i: (True, ""))
         names = [t["name"] for t in h.handle(_rpc("tools/list"))["result"]["tools"]]
-        self.assertEqual(names, ["echo", APPROVAL_TOOL])
+        self.assertEqual(names, ["echo", "shot", "fail", "boom", APPROVAL_TOOL])
 
     def test_tools_call_text(self):
         out = _handler().handle(
@@ -161,6 +164,31 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(payload["behavior"], "deny")
         self.assertEqual(payload["message"], "no thanks")
 
+    def test_unlisted_tool_is_refused_without_calling(self):
+        calls = []
+
+        def call(name, args):
+            calls.append(name)
+            return ToolResult(text="ran")
+
+        h = McpHandler(lambda: [_tool("echo")], call)
+        res = h.handle(_rpc("tools/call", {"name": "secret", "arguments": {}}))[
+            "result"
+        ]
+        self.assertTrue(res["isError"])
+        self.assertIn("Unknown tool: secret", res["content"][0]["text"])
+        self.assertEqual(calls, [])
+        h.handle(_rpc("tools/call", {"name": "echo", "arguments": {}}))
+        self.assertEqual(calls, ["echo"])
+
+    def test_tool_list_is_evaluated_per_request(self):
+        listed = [_tool("echo")]
+        h = McpHandler(lambda: list(listed), _call)
+        args = {"name": "shot", "arguments": {}}
+        self.assertTrue(h.handle(_rpc("tools/call", args))["result"]["isError"])
+        listed.append(_tool("shot"))
+        self.assertFalse(h.handle(_rpc("tools/call", args))["result"]["isError"])
+
     def test_approve_not_available_without_callback(self):
         res = _handler().handle(
             _rpc(
@@ -169,6 +197,7 @@ class ProtocolTest(unittest.TestCase):
             )
         )["result"]
         self.assertTrue(res["isError"])
+        self.assertIn("Unknown tool", res["content"][0]["text"])
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -254,7 +283,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("application/json", headers["Content-Type"])
         names = [t["name"] for t in json.loads(body)["result"]["tools"]]
-        self.assertEqual(names, ["echo"])
+        self.assertEqual(names, ["echo", "shot", "fail", "boom"])
 
     def test_initialize_sets_session_id(self):
         status, headers, body = _post(

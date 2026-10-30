@@ -127,6 +127,10 @@ class McpHandler:
     def _tools_call(self, name: str, arguments: dict) -> dict:
         if name == APPROVAL_TOOL:
             return self._approval_call(arguments)
+        # Only tools in the current listing may run (e.g. READONLY mode).
+        allowed = {t.name for t in self._list_tools()}
+        if name not in allowed:
+            return _text_result(f"Unknown tool: {name}", is_error=True)
         try:
             result = self._call(name, arguments)
         except Exception as exc:
