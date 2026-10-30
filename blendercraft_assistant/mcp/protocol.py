@@ -133,18 +133,18 @@ class McpHandler:
             return _text_result(f"Unknown tool: {name}", is_error=True)
         try:
             result = self._call(name, arguments)
+            content: list[dict] = [{"type": "text", "text": result.text}]
+            for png in result.images:
+                content.append(
+                    {
+                        "type": "image",
+                        "data": base64.b64encode(png).decode("ascii"),
+                        "mimeType": "image/png",
+                    }
+                )
+            return {"content": content, "isError": bool(result.is_error)}
         except Exception as exc:
             return _text_result(f"{type(exc).__name__}: {exc}", is_error=True)
-        content: list[dict] = [{"type": "text", "text": result.text}]
-        for png in result.images:
-            content.append(
-                {
-                    "type": "image",
-                    "data": base64.b64encode(png).decode("ascii"),
-                    "mimeType": "image/png",
-                }
-            )
-        return {"content": content, "isError": bool(result.is_error)}
 
     def _approval_call(self, arguments: dict) -> dict:
         if self._approve is None:

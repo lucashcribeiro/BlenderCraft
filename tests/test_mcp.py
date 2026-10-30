@@ -164,6 +164,14 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(payload["behavior"], "deny")
         self.assertEqual(payload["message"], "no thanks")
 
+    def test_bad_call_return_is_error_result(self):
+        h = McpHandler(lambda: [_tool("echo")], lambda n, a: None)
+        res = h.handle(_rpc("tools/call", {"name": "echo", "arguments": {}}))[
+            "result"
+        ]
+        self.assertTrue(res["isError"])
+        self.assertEqual(res["content"][0]["type"], "text")
+
     def test_unlisted_tool_is_refused_without_calling(self):
         calls = []
 
