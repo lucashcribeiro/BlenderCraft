@@ -210,14 +210,21 @@ class _Recorder:
             screen.areas.remove(area)
 
 
-class _Space:
-    def __init__(self, recorder, kind):
-        object.__setattr__(self, "type", kind)
+class _Recording:
+    """Notes every attribute set, with the override depth at that moment."""
+
+    def __init__(self, recorder, **attrs):
         object.__setattr__(self, "_recorder", recorder)
+        for name, value in attrs.items():
+            object.__setattr__(self, name, value)
 
     def __setattr__(self, name, value):
         self._recorder.sets.append((name, value, self._recorder.depth))
         object.__setattr__(self, name, value)
+
+
+def _Space(recorder, kind):
+    return _Recording(recorder, type=kind, region_3d=_Recording(recorder))
 
 
 def _stub_area(recorder, kind, ui_type=None):
@@ -262,7 +269,11 @@ class TweakUiGuiBranchTest(unittest.TestCase):
         self.assertIsNone(self.run_tweak([window]))
         self.assertEqual(window.screen.areas, [other, view])
         self.assertEqual(self.rec.closes, [1])
-        self.assertEqual(self.rec.sets, [("show_region_ui", True, 1)])
+        self.assertEqual(
+            self.rec.sets,
+            [("show_region_ui", True, 1), ("view_distance", self.template.VIEW_DISTANCE, 1)],
+        )
+        self.assertEqual(self.template.VIEW_DISTANCE, 80.0)
 
     def test_every_timeline_is_closed(self):
         timelines = [_stub_area(self.rec, "DOPESHEET_EDITOR", "TIMELINE") for _ in range(3)]

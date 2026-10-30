@@ -22,6 +22,8 @@ DEFAULT_CUBE_SIZE_MM = 20.0
 RETRY_INTERVAL = 0.5
 MAX_ATTEMPTS = 20
 MAX_CLOSES = 8
+# The default view distance (10 BU) is a 10 mm window; 80 mm frames the 20 mm cube.
+VIEW_DISTANCE = 80.0
 _attempts = 0
 
 
@@ -135,10 +137,11 @@ def _open_sidebar(window, screen) -> None:
             for space in area.spaces:
                 if space.type == "VIEW_3D":
                     space.show_region_ui = True
+                    space.region_3d.view_distance = VIEW_DISTANCE
 
 
 def _tweak_ui():
-    """Timer: close the Layout timeline and open the sidebar. None when done."""
+    """Timer: close the Layout timeline, open the sidebar and frame the cube. None when done."""
     global _attempts
     if not _unsaved():
         return None
