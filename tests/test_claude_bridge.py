@@ -286,7 +286,7 @@ class ConfigFileLifecycleTest(unittest.TestCase):
         path = process_module.mcp_config_file(self._args())
         args = [sys.executable, "-c", "pass", "--mcp-config", path]
         done = threading.Event()
-        proc = ClaudeProcess(args, str(TESTS_DIR), lambda l: None, lambda *a: done.set())
+        proc = ClaudeProcess(args, str(TESTS_DIR), lambda l: None, lambda code, tail: done.set())
         proc.start()
         self.assertTrue(done.wait(10))
         self.assertFalse(os.path.exists(path))
@@ -392,7 +392,7 @@ class ProcessTest(unittest.TestCase):
             [sys.executable, str(FAKE_CLAUDE), str(FIXTURES / f"{fixture}.jsonl")],
             cwd=str(TESTS_DIR),
             on_line=lines.append,
-            on_exit=lambda code: (exits.append(code), done.set()),
+            on_exit=lambda code, tail: (exits.append(code), done.set()),
         )
         return proc, lines, exits, done
 
@@ -435,6 +435,30 @@ class ProcessTest(unittest.TestCase):
         proc.stop()
         self.assertFalse(proc.alive)
 
+    def test_on_exit_receives_exit_code_and_stderr_tail(self):
+        script = (
+            "import sys\n"
+            "sys.stderr.write('first-line-dropped\\n')\n"
+            "sys.stderr.write('x' * 10000)\n"
+            "sys.stderr.write('\\nboom: login required\\n')\n"
+            "sys.exit(1)\n"
+        )
+        got, done = [], threading.Event()
+        proc = ClaudeProcess(
+            [sys.executable, "-c", script],
+            cwd=str(TESTS_DIR),
+            on_line=lambda l: None,
+            on_exit=lambda code, tail: (got.append((code, tail)), done.set()),
+        )
+        proc.start()
+        self.assertTrue(done.wait(10))
+        code, tail = got[0]
+        self.assertEqual(code, 1)
+        self.assertTrue(tail.endswith("boom: login required\n"))
+        self.assertLessEqual(len(tail.encode("utf-8")), 4096)
+        self.assertNotIn("first-line-dropped", tail)
+        proc.stop()
+
     def test_send_user_wire_format(self):
         script = (
             "import sys; sys.stdout.write(sys.stdin.readline()); sys.stdout.flush()"
@@ -444,7 +468,7 @@ class ProcessTest(unittest.TestCase):
             [sys.executable, "-c", script],
             cwd=str(TESTS_DIR),
             on_line=lines.append,
-            on_exit=lambda code: done.set(),
+            on_exit=lambda code, tail: done.set(),
         )
         proc.start()
         content = [{"type": "text", "text": "café → ok"}]
@@ -482,7 +506,7 @@ class ProcessTest(unittest.TestCase):
             [sys.executable, "-c", "import os; os._exit(3)"],
             cwd=str(TESTS_DIR),
             on_line=lines.append,
-            on_exit=lambda code: done.set(),
+            on_exit=lambda code, tail: done.set(),
         )
         proc.start()
         self.assertTrue(done.wait(10))
@@ -507,7 +531,7 @@ class ProcessTest(unittest.TestCase):
             [sys.executable, "-c", script],
             cwd=str(TESTS_DIR),
             on_line=lines.append,
-            on_exit=lambda code: done.set(),
+            on_exit=lambda code, tail: done.set(),
         )
         proc.start()
         self.assertTrue(self._wait_lines(lines, 1))
@@ -522,7 +546,7 @@ class ProcessTest(unittest.TestCase):
             [sys.executable, "-c", script],
             cwd=str(TESTS_DIR),
             on_line=lines.append,
-            on_exit=lambda code: done.set(),
+            on_exit=lambda code, tail: done.set(),
         )
         with mock.patch.dict(os.environ, {"CLAUDECODE": "1"}):
             proc.start()

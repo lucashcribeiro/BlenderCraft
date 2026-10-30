@@ -170,13 +170,20 @@ def build_args(
     return args
 
 
+_STDERR_TAIL_BYTES = 4096
+
+
 class ClaudeProcess:
+    """Runs the CLI. on_line(line) is called for every stdout line and
+    on_exit(returncode, stderr_tail) once at the end, both on the reader
+    thread. stderr_tail is the last ~4 KB the CLI wrote to stderr."""
+
     def __init__(
         self,
         args: list[str],
         cwd: str,
         on_line: Callable[[str], None],
-        on_exit: Callable[[int], None],
+        on_exit: Callable[[int, str], None],
     ):
         self._args = args
         self._cwd = cwd
@@ -184,6 +191,8 @@ class ClaudeProcess:
         self._on_exit = on_exit
         self._proc: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._stderr_tail = b""
         self._write_lock = threading.Lock()
         self._config_file = mcp_config_file(args)
 
@@ -196,8 +205,15 @@ class ClaudeProcess:
             env=clean_env(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            args=(self._proc,),
+            name="blendercraft-claude-stderr",
+            daemon=True,
+        )
+        self._stderr_thread.start()
         self._reader = threading.Thread(
             target=self._read_loop,
             args=(self._proc,),
@@ -205,6 +221,17 @@ class ClaudeProcess:
             daemon=True,
         )
         self._reader.start()
+
+    def _drain_stderr(self, proc: subprocess.Popen) -> None:
+        # Always drain, or a chatty child would block on a full pipe.
+        try:
+            while True:
+                chunk = proc.stderr.read1(4096)
+                if not chunk:
+                    break
+                self._stderr_tail = (self._stderr_tail + chunk)[-_STDERR_TAIL_BYTES:]
+        except (OSError, ValueError):
+            pass
 
     def _read_loop(self, proc: subprocess.Popen) -> None:
         try:
@@ -218,8 +245,11 @@ class ClaudeProcess:
         finally:
             code = proc.wait()
             self._remove_config_file()
+            if self._stderr_thread is not None:
+                self._stderr_thread.join(timeout=2)
+            tail = self._stderr_tail.decode("utf-8", errors="replace")
             try:
-                self._on_exit(code)
+                self._on_exit(code, tail)
             except Exception:
                 pass
 
@@ -272,11 +302,12 @@ class ClaudeProcess:
             pass
         if self._reader is not None and self._reader is not threading.current_thread():
             self._reader.join(timeout=3)
-        try:
-            if proc.stdout is not None:
-                proc.stdout.close()
-        except OSError:
-            pass
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                if stream is not None:
+                    stream.close()
+            except OSError:
+                pass
         self._remove_config_file()
 
     @property

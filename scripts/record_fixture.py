@@ -123,7 +123,7 @@ def main() -> int:
                 write_tools=[],
                 resume=None,
             )
-            proc = ClaudeProcess(args, cwd, lines.put, exited.put)
+            proc = ClaudeProcess(args, cwd, lines.put, lambda code, tail: exited.put(code))
             proc.start()
             proc.send_user([{"type": "text", "text": message}])
             raw = []
