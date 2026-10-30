@@ -161,6 +161,23 @@ class PropsTest(unittest.TestCase):
         self.assertAlmostEqual(self.bc.joint_angle, 45.0)
 
 
+    def test_picking_a_pivot_never_turns_it(self):
+        from blendercraft_assistant.tools.joints import create_pivot
+
+        bpy.ops.mesh.primitive_cube_add(size=10)
+        cube = bpy.context.active_object
+        pivot = create_pivot(cube.name, (0.0, 0.0, 0.0), "Z")
+        obj = bpy.data.objects[pivot]
+        self.addCleanup(bpy.data.objects.remove, obj, do_unlink=True)
+        self.addCleanup(bpy.data.objects.remove, cube, do_unlink=True)
+        # 30.3 has no exact float32 form: the slider shows 30.2999992...
+        obj["bc_angle"] = 30.3
+        rotation = tuple(obj.rotation_euler)
+        self.bc.joint_pivot = pivot
+        self.assertAlmostEqual(self.bc.joint_angle, 30.3, places=4)
+        self.assertEqual(tuple(obj.rotation_euler), rotation)
+        self.assertEqual(obj["bc_angle"], 30.3)
+
 class FakeSession:
     def __init__(self, queue=()):
         self.queue = list(queue)

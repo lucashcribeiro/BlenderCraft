@@ -19,6 +19,7 @@ from ..tools.joints import set_angle
 # Blender treats an empty enum identifier as a separator, so Claude Code's
 # default model ("") is stored as DEFAULT.
 MODEL_DEFAULT = "DEFAULT"
+ANGLE_TOLERANCE = 1e-4  # degrees
 
 _clearing_input = False
 
@@ -67,7 +68,12 @@ def _on_joint_pivot(self, context):
 
 def _on_joint_angle(self, context):
     pivot = _pivot(self)
-    if pivot is not None and pivot.get("bc_angle") != self.joint_angle:
+    if pivot is None:
+        return
+    # The slider is float32: picking a pivot shows its angle rounded, and
+    # that rounding must not turn the pivot.
+    current = pivot.get("bc_angle")
+    if current is None or abs(float(current) - self.joint_angle) > ANGLE_TOLERANCE:
         set_angle(pivot.name, self.joint_angle)
 
 
