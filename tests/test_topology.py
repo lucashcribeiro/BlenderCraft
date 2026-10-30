@@ -214,6 +214,22 @@ class PrintCheckTest(TopologyTestBase):
         self.assertGreater(info["overhang_faces"], 0)
         self.assertAlmostEqual(info["overhang_area_mm2"], 400.0, delta=0.01)
 
+    def test_results_are_in_mm_with_meter_scene(self):
+        # 1 BU = 1 m: the shelf is the mm test scene divided by 1000, sunk 5 mm
+        # under the bed.
+        bpy.context.scene.unit_settings.scale_length = 1.0
+
+        def build(bm):
+            _cube(bm, 0.02, center=(0, 0, 0.005))
+            _cube(bm, 0.02, center=(0.02, 0, 0.005), scale=(1, 1, 0.1))
+
+        _make_object("MeterShelf", build)
+        info = topology.print_check("MeterShelf", min_wall_mm=3.0)
+        self.assertAlmostEqual(info["min_wall_mm"], 2.0, delta=0.01)
+        self.assertGreater(info["thin_faces"], 0)
+        self.assertAlmostEqual(info["overhang_area_mm2"], 400.0, delta=0.01)
+        self.assertAlmostEqual(info["below_bed_mm"], 5.0, delta=0.001)
+
     def test_overhang_angle_threshold(self):
         # overhang_deg is measured from vertical (slicer convention). A plate tilted
         # 30 degrees from horizontal leans 60 degrees from vertical: it is an
