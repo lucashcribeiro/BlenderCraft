@@ -502,11 +502,50 @@ class SessionFailureTest(SessionTestBase):
             "Resumo da conversa anterior:\nuser: sim\nassistant: certo\n\nsim",
         )
 
-    def test_no_fallback_after_session_started(self):
+    def test_fallback_when_error_comes_after_session_started(self):
         self.conv.claude_session_id = "abc"
         session = self.make()
         session.send("oi")
         session.handle_line(init_line("abc"))
+        session.handle_line(result_line("history failed to load", is_error=True))
+        self.assertEqual(len(self.procs), 2)
+        self.assertIsNone(self.procs[1].resume)
+        self.assertEqual(session.status, "WORKING")
+
+    def test_fallback_when_exit_comes_after_session_started(self):
+        self.conv.claude_session_id = "abc"
+        session = self.make()
+        session.send("oi")
+        session.handle_line(init_line("abc"))
+        self.exit_process(session, self.procs[0], 1, "boom")
+        self.assertEqual(len(self.procs), 2)
+        self.assertIsNone(self.procs[1].resume)
+
+    def test_resume_after_stop_mid_tool_then_error_falls_back(self):
+        session = self.make()
+        session.send("x")
+        session.handle_line(init_line("sid-9"))
+        session.handle_line(tool_started_line(1))
+        session.stop()
+        session.send("y")
+        self.assertEqual(self.procs[1].resume, "sid-9")
+        session.handle_line(init_line("sid-9"))
+        session.handle_line(result_line("cannot resume", is_error=True))
+        self.assertEqual(len(self.procs), 3)
+        self.assertIsNone(self.procs[2].resume)
+        self.assertTrue(self.procs[2].sent[0][0]["text"].startswith("Resumo da conversa anterior:"))
+        # at most once per turn
+        session.handle_line(result_line("still failing", is_error=True))
+        self.assertEqual(len(self.procs), 3)
+        self.assertEqual(session.status, "IDLE")
+
+    def test_no_fallback_after_resumed_turn_finished_cleanly(self):
+        self.conv.claude_session_id = "abc"
+        session = self.make()
+        session.send("oi")
+        session.handle_line(init_line("abc"))
+        session.handle_line(result_line("fine"))
+        session.send("again")
         self.exit_process(session, self.procs[0], 1, "boom")
         self.assertEqual(len(self.procs), 1)
         self.assertEqual(session.status, "ERROR")

@@ -80,8 +80,9 @@ class AgentSession:
         # Bumped whenever a process is spawned or dropped; callbacks of an
         # older generation are stale and ignored.
         self._generation = 0
-        # True from a spawn with --resume until the CLI proves the resume
-        # worked (SessionStarted or a clean TurnFinished).
+        # True from a spawn with --resume until the resumed process finishes
+        # a turn cleanly. SessionStarted does not count: the CLI announces
+        # the session before it loads the history, so a resume can still fail.
         self._resume_pending = False
         self._tool_count = 0  # ToolStarted in the current turn
         self._user_index = 0  # position of the current turn's user message
@@ -241,7 +242,6 @@ class AgentSession:
     def _handle_event(self, event) -> None:
         if isinstance(event, SessionStarted):
             self.conversation.claude_session_id = event.session_id
-            self._resume_pending = False
             return
         if self.status != WORKING:  # stale output after stop() / an error
             return
