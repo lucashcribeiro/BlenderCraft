@@ -30,7 +30,7 @@
 - Textos de UI em português e inglês: português se o locale do Blender começar com `pt`, inglês nos demais casos.
 - Chaves e tokens nunca são gravados no `.blend`.
 - O servidor MCP escuta só em `127.0.0.1` e exige `Authorization: Bearer <token>`, com token aleatório por sessão (`secrets.token_urlsafe(32)`).
-- Ferramentas embutidas do Claude Code desligadas (`--tools ""`) e `--strict-mcp-config`.
+- Ferramentas embutidas do Claude Code limitadas à `Skill` (`--tools Skill`), necessária para usar as skills do plugin, e `--strict-mcp-config`.
 - Limite de 40 chamadas de ferramenta por pedido; `undo_steps = 256`.
 - Conversas em `~/Library/Application Support/BlenderCraft/conversations/`.
 - Comando de teste (referido abaixo como `RUN_TESTS`):

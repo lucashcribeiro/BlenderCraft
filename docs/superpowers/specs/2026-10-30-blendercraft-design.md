@@ -48,7 +48,7 @@ O assistente deve entender o que cada função do Blender faz, ter **olhar de de
 **Ponte Claude Code.** A cada conversa o painel inicia um processo `claude` em modo headless:
 - `--print --input-format stream-json --output-format stream-json --include-partial-messages --verbose` mantém o processo vivo entre mensagens, com texto chegando em streaming;
 - `--mcp-config` aponta para o servidor HTTP local, e `--strict-mcp-config` impede que outros servidores MCP do usuário entrem nessa sessão;
-- `--tools` / `--allowedTools` liberam só as ferramentas do BlenderCraft. As ferramentas embutidas do Claude Code (Bash, Edit, Write, WebFetch etc.) ficam desligadas por padrão *(decisão minha: o agente trabalha na cena, não no disco do usuário; o `run_python` já cobre o que for preciso)*;
+- `--tools Skill` / `--allowedTools` liberam só as ferramentas do BlenderCraft e a ferramenta `Skill`, necessária para usar as skills do plugin. As demais ferramentas embutidas do Claude Code (Bash, Edit, Write, WebFetch etc.) ficam desligadas *(decisão minha: o agente trabalha na cena, não no disco do usuário; o `run_python` já cobre o que for preciso)*;
 - `--plugin-dir` carrega um plugin do BlenderCraft com o conhecimento de designer (ver "Inteligência");
 - `--append-system-prompt` adiciona o contexto da sessão: versão do Blender, unidade atual, idioma e regras de trabalho;
 - `--model` vem do seletor de modelo do painel;
