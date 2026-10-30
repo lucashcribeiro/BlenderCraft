@@ -205,6 +205,67 @@ class RuntimeApprovalTest(RuntimeTestBase):
         self.assertFalse(thread.is_alive())
         self.assertFalse(box["decision"][0])
 
+    def two_requests(self):
+        """Two concurrent approvals: one on screen, one waiting behind it."""
+        box = {}
+
+        def worker(key):
+            start = time.monotonic()
+            box[key] = runtime._approve("mcp__blendercraft__run_python", {"code": key})
+            box[f"{key}_seconds"] = time.monotonic() - start
+
+        first = threading.Thread(target=worker, args=("A",), daemon=True)
+        first.start()
+        self.assertTrue(pump_until(lambda: runtime.pending_approval is not None))
+        second = threading.Thread(target=worker, args=("B",), daemon=True)
+        second.start()
+        time.sleep(0.1)  # let it queue behind the first
+        return (first, second), box
+
+    def test_stop_session_denies_queued_requests_too(self):
+        threads, box = self.two_requests()
+        runtime.stop_session()
+        for thread in threads:
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+        self.assertFalse(box["A"][0])
+        self.assertFalse(box["B"][0])
+        self.assertIsNone(runtime.pending_approval)
+
+    def test_new_conversation_denies_queued_requests(self):
+        threads, box = self.two_requests()
+        runtime.new_conversation()
+        for thread in threads:
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+        self.assertIsNone(runtime.pending_approval)
+        self.assertFalse(box["B"][0])
+
+    def test_runtime_stop_denies_queued_requests(self):
+        threads, box = self.two_requests()
+        runtime.stop()
+        for thread in threads:
+            thread.join(5)
+            self.assertFalse(thread.is_alive())
+        self.assertFalse(box["B"][0])
+        self.assertIsNone(runtime.pending_approval)
+
+    def test_requests_after_stop_session_still_shown(self):
+        runtime.stop_session()  # an older Stop does not deny new requests
+        thread, box = self.ask()
+        runtime.answer_approval(True)
+        thread.join(5)
+        self.assertTrue(box["decision"][0])
+
+    def test_lock_wait_counts_against_the_timeout(self):
+        # Nobody answers. Unbounded, the queued request would wait for the
+        # first one (~1 s) and then its own full timeout (~1 s more).
+        with mock.patch.object(runtime, "APPROVAL_TIMEOUT", 1.0):
+            threads, box = self.two_requests()
+            for thread in threads:
+                thread.join(5)
+        self.assertFalse(box["B"][0])
+        self.assertLess(box["B_seconds"], 1.5)
 
 class RuntimeSessionTest(RuntimeTestBase):
     def test_send_spawns_claude_and_streams(self):

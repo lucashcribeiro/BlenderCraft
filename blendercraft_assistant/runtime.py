@@ -60,6 +60,9 @@ model = ""  # "" = Claude Code's default
 claude_problem = ""  # "", "missing" or "login": shown as a panel warning
 
 _approval_lock = threading.Lock()
+# Bumped by every Stop-like action (_deny_pending). A request that started
+# under an older epoch was meant for work that has been cancelled.
+_approval_epoch = 0
 _stoppers: list[threading.Thread] = []
 
 
@@ -103,6 +106,9 @@ def stop() -> None:
     none outlives the add-on (unregister also runs when Blender quits).
     """
     global server, session, token
+    # Cleared first: requests still queued for the approval lock see it and
+    # deny instead of showing up after the deny below.
+    srv, server = server, None
     _deny_pending("The Blender assistant was stopped.")
     if session is not None:
         try:
@@ -110,7 +116,6 @@ def stop() -> None:
         except Exception:  # noqa: BLE001 - shutting down regardless
             traceback.print_exc()
         session = None
-    srv, server = server, None
     if srv is not None:
         srv.stop()
     token = ""
@@ -194,23 +199,36 @@ def _call(name: str, args: dict):
 
 
 def _approve(tool_name: str, tool_input: dict) -> tuple[bool, str]:
-    """Show the request in the panel and wait for Approve/Deny."""
+    """Show the request in the panel and wait for Approve/Deny.
+
+    Requests wait their turn for the panel; the whole wait, queueing
+    included, is bounded by APPROVAL_TIMEOUT. A Stop (or anything else that
+    calls _deny_pending) denies the request on screen and every request
+    that arrived before it.
+    """
     global pending_approval
     name = tool_name[len(TOOL_PREFIX):] if tool_name.startswith(TOOL_PREFIX) else tool_name
-    event = threading.Event()
-    answer: list[tuple[bool, str]] = []
-    with _approval_lock:  # one request on screen at a time
-        if server is None:
-            return False, "The Blender assistant was stopped."
+    epoch = _approval_epoch
+    deadline = time.monotonic() + APPROVAL_TIMEOUT
+    cancelled = (False, "The request was cancelled: the user stopped the assistant.")
+    if not _approval_lock.acquire(timeout=APPROVAL_TIMEOUT):
+        return False, "The user did not answer in time."
+    try:
+        if server is None or epoch != _approval_epoch:
+            return cancelled
+        event = threading.Event()
+        answer: list[tuple[bool, str]] = []
         pending_approval = (name, tool_input, event, answer)
         mainthread.post(tag_redraw)
         try:
-            answered = event.wait(APPROVAL_TIMEOUT)
+            answered = event.wait(max(0.0, deadline - time.monotonic()))
         finally:
             current = pending_approval  # read once: the main thread may clear it
             if current is not None and current[2] is event:
                 pending_approval = None
             mainthread.post(tag_redraw)
+    finally:
+        _approval_lock.release()
     if not answered or not answer:
         return False, "The user did not answer in time."
     return answer[0]
@@ -223,6 +241,9 @@ def answer_approval(allow: bool) -> None:
 
 
 def _deny_pending(reason: str) -> None:
+    """Deny the request on screen and cancel those queued behind it."""
+    global _approval_epoch
+    _approval_epoch += 1
     _resolve_pending(False, reason)
 
 
