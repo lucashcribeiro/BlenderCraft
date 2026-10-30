@@ -94,6 +94,25 @@ def reset(pivot: str) -> None:
     set_angle(pivot, 0.0)
 
 
+def _save_rotation(obj) -> tuple:
+    """Every rotation field of ``obj``, so a restore is exact in any mode."""
+    return (
+        obj.rotation_mode,
+        obj.rotation_euler.copy(),
+        obj.rotation_quaternion.copy(),
+        tuple(obj.rotation_axis_angle),
+    )
+
+
+def _restore_rotation(obj, saved: tuple) -> None:
+    mode, euler, quaternion, axis_angle = saved
+    # Switching the mode converts the other rotation fields, so it goes first.
+    obj.rotation_mode = mode
+    obj.rotation_euler = euler
+    obj.rotation_quaternion = quaternion
+    obj.rotation_axis_angle = axis_angle
+
+
 def _moving_meshes(pivot_obj) -> list:
     meshes = [o for o in pivot_obj.children_recursive if o.type == "MESH"]
     if not meshes:
@@ -206,8 +225,7 @@ def joint_test(
             if obstacle.type != "MESH":
                 raise ValueError(f"Object is not a mesh: {obstacle.name}")
 
-    saved_rotation = pivot_obj.rotation_euler.copy()
-    saved_mode = pivot_obj.rotation_mode
+    saved_rotation = _save_rotation(pivot_obj)
     saved_angle = pivot_obj.get("bc_angle")
     moving_meshes: list = []  # (object, local-space bmesh), freed in finally
     try:
@@ -259,8 +277,7 @@ def joint_test(
     finally:
         for _, local_bm in moving_meshes:
             local_bm.free()
-        pivot_obj.rotation_mode = saved_mode
-        pivot_obj.rotation_euler = saved_rotation
+        _restore_rotation(pivot_obj, saved_rotation)
         if saved_angle is None:
             if "bc_angle" in pivot_obj:
                 del pivot_obj["bc_angle"]

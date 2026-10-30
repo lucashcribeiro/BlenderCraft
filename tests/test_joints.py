@@ -161,6 +161,29 @@ class JointTestSweep(JointTestBase):
         self.assertEqual(tuple(pivot.rotation_euler), before)
         self.assertEqual(pivot["bc_angle"], 25.0)
 
+    def test_restores_full_rotation_state(self):
+        pivot = bpy.data.objects[self.pivot]
+        pivot.rotation_mode = "QUATERNION"
+        pivot.rotation_quaternion = (0.5, 0.5, 0.5, 0.5)
+        pivot.rotation_axis_angle = (1.0, 0.0, 1.0, 0.0)
+        pivot.rotation_euler = (0.1, 0.2, 0.3)
+        state = (
+            tuple(pivot.rotation_quaternion),
+            tuple(pivot.rotation_axis_angle),
+            tuple(pivot.rotation_euler),
+        )
+        self._obstacle((0, 6, 0))
+        joints.joint_test(self.pivot)
+        self.assertEqual(pivot.rotation_mode, "QUATERNION")
+        self.assertEqual(
+            (
+                tuple(pivot.rotation_quaternion),
+                tuple(pivot.rotation_axis_angle),
+                tuple(pivot.rotation_euler),
+            ),
+            state,
+        )
+
     def test_error_leaves_angle_untouched(self):
         joints.set_angle(self.pivot, 25.0)
         with self.assertRaises(ValueError):
