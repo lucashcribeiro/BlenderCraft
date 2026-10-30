@@ -1,6 +1,8 @@
 import unittest
 from unittest import mock
 
+import bpy
+
 from blendercraft_assistant import i18n
 from blendercraft_assistant.ui.text_wrap import strip_markdown, wrap
 
@@ -91,6 +93,72 @@ class TextWrapTest(unittest.TestCase):
             "Veja a documentação e isto.\n"
             "Nota #3 fica.",
         )
+
+
+class PropsTest(unittest.TestCase):
+    def setUp(self):
+        from blendercraft_assistant import runtime
+        from blendercraft_assistant.ui import prefs, props
+
+        self.runtime = runtime
+        props.register()
+        self.addCleanup(props.unregister)
+        prefs.register()
+        self.addCleanup(prefs.unregister)
+        runtime.mode = "AUTO"
+        runtime.model = ""
+        self.addCleanup(setattr, runtime, "mode", "AUTO")
+        self.addCleanup(setattr, runtime, "model", "")
+        self.bc = bpy.context.window_manager.bc
+
+    def test_prefs_id_is_the_package(self):
+        from blendercraft_assistant.ui import prefs
+
+        self.assertEqual(prefs.BC_AddonPreferences.bl_idname, "blendercraft_assistant")
+        self.assertEqual(prefs.ADDON_ID, self.runtime.ADDON_ID)
+
+    def test_defaults(self):
+        self.assertEqual(self.bc.mode, "AUTO")
+        self.assertEqual(self.bc.model, "DEFAULT")
+        self.assertFalse(self.bc.attach_view)
+        self.assertFalse(self.bc.attach_selection)
+        self.assertEqual(self.bc.show_older, 0)
+
+    def test_mode_and_model_reach_runtime(self):
+        with mock.patch.object(self.runtime, "stop_session") as stop_session:
+            self.bc.mode = "READONLY"
+            self.assertEqual(self.runtime.mode, "READONLY")
+            self.bc.model = "sonnet"
+            self.assertEqual(self.runtime.model, "sonnet")
+            self.bc.model = "DEFAULT"
+            self.assertEqual(self.runtime.model, "")
+        self.assertEqual(stop_session.call_count, 3)
+
+    def test_load_post_restores_props_from_runtime(self):
+        from blendercraft_assistant.ui import props
+
+        self.runtime.mode = "ASK"
+        self.runtime.model = "haiku"
+        props._sync_after_load()
+        self.assertEqual(self.bc.mode, "ASK")
+        self.assertEqual(self.bc.model, "haiku")
+
+    def test_joint_angle_turns_pivot(self):
+        from blendercraft_assistant.tools.joints import create_pivot
+
+        bpy.ops.mesh.primitive_cube_add(size=10)
+        cube = bpy.context.active_object
+        pivot = create_pivot(cube.name, (0.0, 0.0, 0.0), "Z")
+        self.addCleanup(bpy.data.objects.remove, bpy.data.objects[pivot], do_unlink=True)
+        self.addCleanup(bpy.data.objects.remove, cube, do_unlink=True)
+        self.bc.joint_pivot = pivot
+        self.bc.joint_angle = 30.0
+        self.assertAlmostEqual(bpy.data.objects[pivot]["bc_angle"], 30.0)
+        self.bc.joint_pivot = ""
+        self.bc.joint_angle = 0.0  # no pivot: nothing happens
+        bpy.data.objects[pivot]["bc_angle"] = 45.0
+        self.bc.joint_pivot = pivot  # picking a pivot shows its angle
+        self.assertAlmostEqual(self.bc.joint_angle, 45.0)
 
 
 if __name__ == "__main__":

@@ -77,7 +77,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "mcp_copied": "Comando copiado",
         "server_off": "O servidor MCP não está rodando",
         "claude_path": "Caminho do Claude Code",
+        "claude_path_desc": "Vazio: procura claude no PATH e nos locais de instalação comuns",
         "external_port": "Porta do servidor MCP (0 = aleatória)",
+        "external_port_desc": "Porta fixa para usar o servidor de fora; vale ao religar a extensão",
     },
     "en": {
         "assistant": "Assistant",
@@ -149,7 +151,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "mcp_copied": "Command copied",
         "server_off": "The MCP server is not running",
         "claude_path": "Claude Code path",
+        "claude_path_desc": "Empty: look for claude on PATH and in the usual install locations",
         "external_port": "MCP server port (0 = random)",
+        "external_port_desc": "Fixed port to use the server from outside; applies when the extension is re-enabled",
     },
 }
 
