@@ -100,7 +100,10 @@ class SessionTestBase(unittest.TestCase):
         return proc
 
     def make(self, **kwargs):
-        kwargs.setdefault("notes", {"step_limit": "STEP LIMIT NOTE"})
+        kwargs.setdefault(
+            "notes",
+            {"step_limit": "STEP LIMIT NOTE", "queue_dropped": "({n} DROPPED)"},
+        )
         return AgentSession(
             self.conv,
             self.store,
@@ -255,8 +258,59 @@ class SessionQueueTest(SessionTestBase):
         self.assertEqual(self.conv.messages[1].tools[0].status, "interrupted")
         self.assertEqual(len(self.procs), 2)
         self.assertEqual(self.procs[1].sent, [[{"type": "text", "text": "agora"}]])
+        self.assertEqual(session.queue, [("fila", [])])  # kept, behind "agora"
+        self.assertEqual(session.status, "WORKING")
+        self.feed_fixture(session, "text_turn")
+        self.assertEqual(self.procs[1].sent[1], [{"type": "text", "text": "fila"}])
+        self.assertEqual(session.queue, [])
+
+    def test_stop_clears_queue(self):
+        session = self.make()
+        session.send("um")
+        session.send("dois")
+        session.stop()
+        self.assertEqual(session.queue, [])
+        self.assertEqual(session.status, "IDLE")
+        self.assertEqual(len(self.procs), 1)  # nothing was sent after the stop
+
+    def test_close_clears_queue(self):
+        session = self.make()
+        session.send("um")
+        session.send("dois")
+        session.close()
+        self.assertEqual(session.queue, [])
+        self.assertEqual(len(self.procs), 1)
+
+    def test_step_limit_keeps_queue_and_continues(self):
+        session = self.make(max_tool_calls=1)
+        session.send("um")
+        session.send("dois")
+        session.handle_line(tool_started_line(1))
+        session.handle_line(tool_started_line(2))  # over the limit
+        self.assertTrue(self.procs[0].stopped)
+        self.assertIn("STEP LIMIT NOTE", self.conv.messages[1].text)
         self.assertEqual(session.queue, [])
         self.assertEqual(session.status, "WORKING")
+        self.assertEqual(len(self.procs), 2)
+        self.assertEqual(self.procs[1].sent, [[{"type": "text", "text": "dois"}]])
+        self.assertEqual([m.role for m in self.conv.messages], ["user", "assistant"] * 2)
+
+    def test_error_drops_queue_and_says_so(self):
+        session = self.make()
+        session.send("um")
+        session.send("dois")
+        session.send("tres")
+        self.exit_process(session, self.procs[0], 3, "boom")
+        self.assertEqual(session.status, "ERROR")
+        self.assertEqual(session.queue, [])
+        self.assertIn("boom", session.error)
+        self.assertTrue(session.error.endswith("(2 DROPPED)"))
+
+    def test_error_without_queue_has_no_drop_note(self):
+        session = self.make()
+        session.send("um")
+        self.exit_process(session, self.procs[0], 3, "boom")
+        self.assertNotIn("DROPPED", session.error)
 
 
 class SessionStopTest(SessionTestBase):
@@ -324,6 +378,18 @@ class SessionStopTest(SessionTestBase):
         new.on_line(result_line("new"))
         self.assertEqual(self.conv.messages[3].text, "new text")
         self.assertEqual(session.status, "IDLE")
+
+    def test_old_process_events_dropped_mid_line(self):
+        session = self.make(max_tool_calls=1)
+        session.send("x")
+        session.send("queued")
+        blocks = [
+            {"type": "tool_use", "id": f"tu{i}", "name": "mcp__blendercraft__b", "input": {}}
+            for i in (1, 2, 3)
+        ]
+        session.handle_line(json.dumps({"type": "assistant", "message": {"content": blocks}}))
+        # tool 2 hit the limit and started the queued turn; tool 3 is stale
+        self.assertEqual(self.conv.messages[3].tools, [])
 
     def test_close_stops_process(self):
         session = self.make()

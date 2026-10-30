@@ -32,6 +32,7 @@ SUMMARY_MESSAGES = 10
 
 _DEFAULT_NOTES = {
     "step_limit": "Stopped: tool call limit reached for this request.",
+    "queue_dropped": "({n} queued messages discarded)",  # str.format(n=...)
 }
 
 
@@ -97,22 +98,27 @@ class AgentSession:
         self._begin_turn(text, attachments)
 
     def send_now(self, text: str, attachments: list[dict] = ()) -> None:
-        """Interrupt the current work and send right away (queue dropped)."""
-        self.stop()
-        self.send(text, attachments)
+        """Interrupt the current work and send right away; queued messages
+        stay, behind this one."""
+        self._halt()
+        self._begin_turn(text, list(attachments))
 
     def stop(self) -> None:
+        """User Stop: halt and drop the queued messages, which were written
+        for the work that was just cancelled."""
+        self.queue.clear()
+        self._halt()
+
+    def _halt(self) -> None:
         """Kill the process, mark running tools interrupted, go IDLE and
-        save. The next send() respawns with --resume. Queued messages are
-        dropped: they were written for the work that was just cancelled."""
+        save. The next send() respawns with --resume."""
         self._drop_process()
         self._interrupt_tools()
-        self.queue.clear()
         self.status = IDLE
         self._save()
 
     def close(self) -> None:
-        """New conversation / quitting: stop() and save."""
+        """New conversation / quitting: stop() (queue dropped) and save."""
         self.stop()
 
     def handle_line(self, line: str) -> None:
@@ -157,6 +163,11 @@ class AgentSession:
         self.status = WORKING
         if self._deliver([{"type": "text", "text": text}, *attachments]):
             self._save()
+
+    def _start_next(self) -> None:
+        if self.queue:
+            text, attachments = self.queue.pop(0)
+            self._begin_turn(text, attachments)
 
     def _deliver(self, content: list[dict]) -> bool:
         """Send content, (re)creating the process as needed. A dead process
@@ -219,6 +230,10 @@ class AgentSession:
     def _fail(self, message: str, detail: str = "") -> None:
         self.status = ERROR
         self.error = f"{message}\n{detail}" if detail else message
+        if self.queue:
+            note = self._notes["queue_dropped"].format(n=len(self.queue))
+            self.error = f"{self.error}\n{note}"
+            self.queue.clear()
         self._save()
 
     # ---- events -----------------------------------------------------
@@ -254,7 +269,8 @@ class AgentSession:
         if self._tool_count > self.max_tool_calls:
             note = self._notes["step_limit"]
             self._assistant.text = f"{self._assistant.text}\n\n{note}".strip()
-            self.stop()
+            self._halt()  # the queue is kept: carry on with the next message
+            self._start_next()
 
     def _tool_finished(self, event: ToolFinished) -> None:
         tool = self._find_tool(event.tool_use_id)
@@ -274,9 +290,7 @@ class AgentSession:
             self._assistant.text = event.result
         self.status = IDLE
         self._save()
-        if self.queue:
-            text, attachments = self.queue.pop(0)
-            self._begin_turn(text, attachments)
+        self._start_next()
 
     # ---- helpers ----------------------------------------------------
 
