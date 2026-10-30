@@ -78,6 +78,10 @@ class AgentSession:
         # Called whenever a user turn is sent to Claude, queued ones included
         # (the runtime resets the undo tracker there).
         on_turn_begin: Callable[[], None] | None = None,
+        # Returns a line put before each user message as Claude receives it
+        # (not in the conversation shown to the user): display unit, scale
+        # and language, read when the message is actually sent.
+        context: Callable[[], str] | None = None,
     ):
         self.conversation = conversation
         self.store = store
@@ -86,6 +90,7 @@ class AgentSession:
         self.max_tool_calls = max_tool_calls
         self._notes = {**_DEFAULT_NOTES, **(notes or {})}
         self._on_turn_begin = on_turn_begin
+        self._context = context
 
         self.status = IDLE
         self.queue: list[tuple[str, list[dict]]] = []
@@ -103,7 +108,8 @@ class AgentSession:
         self._tool_count = 0  # ToolStarted in the current turn
         self._user_index = 0  # position of the current turn's user message
         self._assistant: Message | None = None
-        self._pending: tuple[str, list[dict]] = ("", [])  # current turn's input
+        # Current turn's input as Claude receives it (context line included).
+        self._pending: tuple[str, list[dict]] = ("", [])
 
     # ---- public API -------------------------------------------------
 
@@ -179,9 +185,11 @@ class AgentSession:
         self._user_index = len(conv.messages)
         self._assistant = Message("assistant")
         conv.messages += [Message("user", text), self._assistant]
-        self._pending = (text, attachments)
+        context = self._context() if self._context is not None else ""
+        sent = f"{context}\n{text}" if context else text
+        self._pending = (sent, attachments)
         self.status = WORKING
-        if self._deliver([{"type": "text", "text": text}, *attachments]):
+        if self._deliver([{"type": "text", "text": sent}, *attachments]):
             self._save()
 
     def _start_next(self) -> None:

@@ -234,6 +234,14 @@ class InspectTest(unittest.TestCase):
         self.assertEqual(data["unit"], "IN")
         self.assertIn("1.000 in", data["objects"][0]["dimensions"][0])
 
+    def test_inspect_scene_reports_mm_per_bu(self):
+        data = json.loads(call_tool("inspect_scene", {}).text)
+        self.assertEqual(data["mm_per_bu"], 1.0)
+        # A file made elsewhere keeps its own scale (1 BU = 1 m here).
+        bpy.context.scene.unit_settings.scale_length = 1.0
+        data = json.loads(call_tool("inspect_scene", {}).text)
+        self.assertEqual(data["mm_per_bu"], 1000.0)
+
     def test_inspect_object(self):
         _add_cube("Caixa", 20.0, x_mm=100.0)
         res = call_tool("inspect_object", {"name": "Caixa"})

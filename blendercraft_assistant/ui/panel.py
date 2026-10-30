@@ -7,7 +7,7 @@ from bpy.types import Panel
 
 from .. import runtime
 from ..i18n import t
-from ..units import get_display_unit
+from ..units import get_display_unit, mm_per_bu
 from . import operators
 from .text_wrap import strip_markdown, wrap
 
@@ -180,6 +180,9 @@ class VIEW3D_PT_bc_assistant(Panel):
         row.operator_menu_enum(
             "bc.set_unit", "unit", text=_UNIT_LABELS[get_display_unit(context.scene)]
         )
+        scale = mm_per_bu(context.scene)
+        if scale != 1.0:
+            _text_lines(layout, context, t("scale_warning", mm=f"{scale:g}"), alert=True)
 
 
 class VIEW3D_PT_bc_conversations(Panel):

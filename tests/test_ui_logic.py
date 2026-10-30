@@ -15,7 +15,7 @@ REQUIRED_KEYS = (
     "queued attach_view attach_selection mode_auto mode_ask mode_readonly "
     "changes undo_ai undo_ai_blocked details show_older approve deny "
     "approval_request claude_missing claude_login step_limit unit joint "
-    "joint_reset copy_mcp"
+    "joint_reset copy_mcp scale_warning"
 ).split()
 
 
@@ -648,6 +648,19 @@ class PanelDrawTest(unittest.TestCase):
         self.runtime.claude_problem = "login"
         labels = " ".join(self.labels(self.draw(self.panel.VIEW3D_PT_bc_assistant)))
         self.assertIn(i18n.t("claude_login"), labels)
+
+    def test_scale_warning_when_file_is_not_in_mm(self):
+        from blendercraft_assistant import units
+
+        scene = bpy.context.scene
+        units.apply_internal_mm(scene)
+        self.addCleanup(units.apply_internal_mm, scene)
+        warning = i18n.t("scale_warning", mm="1000")
+        labels = " ".join(self.labels(self.draw(self.panel.VIEW3D_PT_bc_assistant)))
+        self.assertNotIn(warning, labels)
+        scene.unit_settings.scale_length = 1.0
+        labels = " ".join(self.labels(self.draw(self.panel.VIEW3D_PT_bc_assistant)))
+        self.assertIn(warning, labels)
 
     def test_error_shown(self):
         self.session.status = "ERROR"

@@ -211,6 +211,26 @@ class SessionFlowTest(SessionTestBase):
         self.assertEqual(self.conv.messages[1].text, "parcial")
 
 
+class SessionContextTest(SessionTestBase):
+    def test_context_line_prepended_to_what_claude_receives(self):
+        contexts = iter(["[CTX 1]", "[CTX 2]"])
+        session = self.make(context=lambda: next(contexts))
+        session.send("oi")
+        self.assertEqual(self.procs[0].sent, [[{"type": "text", "text": "[CTX 1]\noi"}]])
+        session.send("depois")  # queued: its context is read when it is sent
+        self.feed_fixture(session, "text_turn")
+        self.assertEqual(self.procs[0].sent[1], [{"type": "text", "text": "[CTX 2]\ndepois"}])
+        # The conversation keeps what the user typed.
+        self.assertEqual([m.text for m in self.conv.messages if m.role == "user"], ["oi", "depois"])
+
+    def test_fallback_replay_keeps_the_context_line(self):
+        self.conv.claude_session_id = "abc"
+        session = self.make(context=lambda: "[CTX]")
+        session.send("q")
+        self.exit_process(session, self.procs[0], 1)
+        self.assertTrue(self.procs[1].sent[0][0]["text"].endswith("\n\n[CTX]\nq"))
+
+
 class SessionQueueTest(SessionTestBase):
     def test_queue_while_working(self):
         session = self.make()

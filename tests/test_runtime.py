@@ -379,6 +379,52 @@ class RuntimeSessionTest(RuntimeTestBase):
         self.assertEqual(limit, runtime.MAX_TOOL_CALLS)
         self.assertEqual(session.max_tool_calls, runtime.MAX_TOOL_CALLS)
 
+    def test_each_message_carries_the_current_unit_scale_and_language(self):
+        from blendercraft_assistant import i18n
+
+        sent = []
+
+        class _Proc:
+            alive = True
+
+            def send_user(self, content):
+                sent.append(content[0]["text"])
+
+            def stop(self):
+                pass
+
+        scene = bpy.context.scene
+        units.apply_internal_mm(scene)
+        self.addCleanup(units.apply_internal_mm, scene)
+        with mock.patch.object(runtime, "_spawn", lambda *a: _Proc()), \
+                mock.patch.object(i18n, "_locale", return_value="pt_BR"):
+            session = runtime.ensure_session()
+            session.send("oi")
+            session.handle_line(json.dumps({"type": "result", "result": "ok"}))
+            units.set_display_unit(scene, "IN")
+            scene.unit_settings.scale_length = 1.0
+            session.send("e agora?")
+        self.assertEqual(
+            sent[0], "[BlenderCraft: unidade exibida = mm · 1 BU = 1 mm · idioma = pt]\noi"
+        )
+        self.assertEqual(
+            sent[1],
+            "[BlenderCraft: unidade exibida = in · 1 BU = 1000 mm · idioma = pt]\ne agora?",
+        )
+
+    def test_spawn_passes_the_file_scale_to_the_prompt(self):
+        claude = self.fake_claude(FIXTURES / "text_turn.jsonl")
+        scene = bpy.context.scene
+        units.apply_internal_mm(scene)
+        self.addCleanup(units.apply_internal_mm, scene)
+        scene.unit_settings.scale_length = 0.01
+        with mock.patch.object(runtime, "find_claude", return_value=claude), \
+                mock.patch.object(runtime, "build_system_prompt", return_value="P") as build:
+            session = runtime.ensure_session()
+            session.send("oi")
+            self.assertTrue(pump_until(lambda: session.status == "IDLE"))
+        self.assertEqual(build.call_args.kwargs["mm_per_bu"], 10.0)
+
     def test_mode_and_model_change_restart_with_resume(self):
         claude = self.fake_claude(FIXTURES / "text_turn.jsonl")
         with mock.patch.object(runtime, "find_claude", return_value=claude):

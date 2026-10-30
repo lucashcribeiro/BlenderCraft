@@ -7,7 +7,12 @@ import bpy
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-from ..units import display_scale_and_suffix, format_length, get_display_unit
+from ..units import (
+    display_scale_and_suffix,
+    format_length,
+    get_display_unit,
+    mm_per_bu,
+)
 from .base import Tool, json_result, register_tool
 
 # Above this many edge pairs the exact edge-edge search is skipped.
@@ -74,6 +79,8 @@ def _inspect_scene(args: dict):
     return json_result(
         {
             "unit": get_display_unit(scene),
+            # Not always 1: files made outside BlenderCraft keep their scale.
+            "mm_per_bu": mm_per_bu(scene),
             "objects": [_object_info(o, scene) for o in scene.objects],
             "active": active.name if active else None,
         }
@@ -242,7 +249,8 @@ register_tool(
         description=(
             "List every object in the scene with type, parent, location, "
             "rotation (degrees), scale, dimensions, materials, modifiers, "
-            "visibility and selection. Lengths are in the displayed unit."
+            "visibility and selection. Lengths are in the displayed unit; "
+            "mm_per_bu is the file's scale (millimeters per Blender unit)."
         ),
         input_schema={"type": "object", "properties": {}},
         handler=_inspect_scene,

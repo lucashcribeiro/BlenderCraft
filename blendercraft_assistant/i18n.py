@@ -63,6 +63,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "send_failed": "Não foi possível falar com o Claude Code: {error}",
         "save_failed": "Não foi possível salvar a conversa: {error}",
         "unit": "Unidade",
+        "scale_warning": (
+            "Este arquivo não está em milímetros: 1 unidade do Blender = {mm} mm."
+        ),
         "joint": "Articulação",
         "joint_pivot": "Pivô",
         "joint_create": "Criar articulação",
@@ -140,6 +143,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "send_failed": "Could not talk to Claude Code: {error}",
         "save_failed": "Could not save the conversation: {error}",
         "unit": "Unit",
+        "scale_warning": (
+            "This file is not in millimeters: 1 Blender unit = {mm} mm."
+        ),
         "joint": "Joint",
         "joint_pivot": "Pivot",
         "joint_create": "Create joint",

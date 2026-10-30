@@ -16,15 +16,26 @@ You are BlenderCraft, an assistant embedded in a side panel of Blender \
 blendercraft MCP tools. Think like a careful 3D designer and a print-minded \
 engineer, not like a script generator.
 
+# Context line
+Every user message starts with a line like \
+`[BlenderCraft: unidade exibida = mm · 1 BU = 1 mm · idioma = pt]`: the \
+unit the user sees, how many mm one Blender unit is in the open file and \
+the language to reply in (pt or en), read when the message was sent. The user can change them at any time, so the latest \
+context line overrides this prompt. The user did not type it; do not \
+mention it.
+
 # Language
 Answer in {language}. Keep replies short and concrete. Code, object names \
 and tool arguments stay in English.
 
 # Units
-Internally 1 Blender unit = 1 mm, always. The user sees lengths in \
+Files made by BlenderCraft use 1 Blender unit (BU) = 1 mm, but a file made \
+elsewhere keeps its own scale: when this session started, 1 BU = \
+{mm_per_bu} mm in this file; see the context line for the current value \
+(inspect_scene also reports it as mm_per_bu). The user sees lengths in \
 {unit}. run_python and the tool arguments that take lengths use Blender \
-units (mm); inspect_scene, inspect_object and measure report lengths in \
-the displayed unit. When the user gives a size in another unit, convert it \
+units; inspect_scene, inspect_object and measure report lengths in the \
+displayed unit. When the user gives a size in another unit, convert it \
 (25.4 mm = 1 in) and say the result. STL, OBJ, PLY and 3MF always export in \
 mm; glTF in meters.
 
@@ -75,17 +86,26 @@ line, without doing it.
 """
 
 
+def _number(value: float) -> str:
+    return f"{value:g}"
+
+
 def build_system_prompt(
     blender_version: str,
     display_unit: str,
     language: str,
     max_tool_calls: int = 40,
+    mm_per_bu: float = 1.0,
 ) -> str:
     """Prompt text for a session.
 
     ``display_unit`` is mm, cm, m, in or ft (any case); ``language`` is "pt"
     or "en" and decides the language of the replies (English if unknown).
     ``max_tool_calls`` is the per-request tool-call limit the session enforces.
+    ``mm_per_bu`` is the open file's scale when the session starts.
+
+    Claude Code keeps the first prompt of a session (it is reused on
+    --resume), so values that change later also go in context_line().
     """
     unit = _UNIT_NAMES.get(str(display_unit).lower(), str(display_unit))
     return _TEMPLATE.format(
@@ -93,4 +113,14 @@ def build_system_prompt(
         unit=unit,
         language=_LANGUAGE_NAMES.get(language, "English"),
         max_tool_calls=max_tool_calls,
+        mm_per_bu=_number(mm_per_bu),
+    )
+
+
+def context_line(display_unit: str, mm_per_bu: float, language: str) -> str:
+    """Line put before every user message sent to Claude: the display unit,
+    the file's scale and the reply language at the moment of sending."""
+    return (
+        f"[BlenderCraft: unidade exibida = {str(display_unit).lower()} · "
+        f"1 BU = {_number(mm_per_bu)} mm · idioma = {language}]"
     )

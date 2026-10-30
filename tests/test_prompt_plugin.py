@@ -3,7 +3,7 @@ import re
 import unittest
 from pathlib import Path
 
-from blendercraft_assistant.claude.system_prompt import build_system_prompt
+from blendercraft_assistant.claude.system_prompt import build_system_prompt, context_line
 
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "blendercraft_assistant" / "plugin"
@@ -52,6 +52,24 @@ class PromptTests(unittest.TestCase):
             "list_operators",
         ):
             self.assertIn(phrase, text)
+
+    def test_prompt_states_the_file_scale_and_the_context_line(self):
+        text = build_system_prompt("5.2.2", "mm", "en", mm_per_bu=1000.0)
+        self.assertIn("1 BU = 1000 mm", text)
+        self.assertNotIn("1 mm, always", text)
+        self.assertIn("[BlenderCraft:", text)
+        self.assertIn("overrides this prompt", text)
+        self.assertIn("1 BU = 1 mm", build_system_prompt("5.2.2", "mm", "en"))
+
+    def test_context_line(self):
+        self.assertEqual(
+            context_line("in", 1.0, "pt"),
+            "[BlenderCraft: unidade exibida = in · 1 BU = 1 mm · idioma = pt]",
+        )
+        self.assertEqual(
+            context_line("MM", 0.001, "en"),
+            "[BlenderCraft: unidade exibida = mm · 1 BU = 0.001 mm · idioma = en]",
+        )
 
     def test_tool_call_limit_is_a_parameter(self):
         self.assertIn("(40)", build_system_prompt("5.2.2", "mm", "en"))

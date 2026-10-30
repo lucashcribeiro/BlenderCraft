@@ -157,8 +157,9 @@ register_tool(
             "Vector, Matrix and math already available (a fresh namespace on "
             "every call). Returns what the code prints plus the repr of a "
             "final expression, or the traceback on error. This is the main "
-            "modelling tool; each call is one undo step. Units are mm "
-            "(1 BU = 1 mm)."
+            "modelling tool; each call is one undo step. Lengths are Blender "
+            "units: 1 BU = 1 mm in BlenderCraft files, otherwise see "
+            "mm_per_bu in inspect_scene."
         ),
         input_schema={
             "type": "object",

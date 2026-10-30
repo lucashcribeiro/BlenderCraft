@@ -320,7 +320,7 @@ register_tool(
         name="joint_create",
         description=(
             "Make a part rotate about a pivot: creates an empty BC_Pivo_<part> "
-            "at point (Blender units, mm) and parents the part to it, keeping "
+            "at point (Blender units) and parents the part to it, keeping "
             "its position. axis is X, Y or Z. No animation is used."
         ),
         input_schema={

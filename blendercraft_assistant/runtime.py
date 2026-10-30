@@ -22,7 +22,7 @@ from bpy.app.handlers import persistent
 from . import mainthread
 from .claude.process import TOOL_PREFIX, ClaudeProcess, build_args, find_claude
 from .claude.session import MAX_TOOL_CALLS, NOTE_KEYS, AgentSession
-from .claude.system_prompt import build_system_prompt
+from .claude.system_prompt import build_system_prompt, context_line
 from .conversations import ConversationStore
 from .i18n import lang, t
 from .mcp.protocol import McpHandler
@@ -31,7 +31,7 @@ from .tools import load_all
 from .tools.base import REGISTRY, ToolResult, tools_for_mode
 from .tools.dispatch import call_tool
 from .undo import ChangeTracker
-from .units import get_display_unit
+from .units import get_display_unit, mm_per_bu
 
 log = logging.getLogger(__name__)
 
@@ -330,7 +330,13 @@ def _make_session(conversation) -> AgentSession:
         max_tool_calls=MAX_TOOL_CALLS,
         notes={key: t(key) for key in NOTE_KEYS},  # templates, filled by the session
         on_turn_begin=_on_turn_begin,
+        context=_context_line,
     )
+
+
+def _context_line() -> str:
+    scene = bpy.context.scene
+    return context_line(get_display_unit(scene), mm_per_bu(scene), lang())
 
 
 def _close_session() -> None:
@@ -424,6 +430,7 @@ def _spawn(resume_id, on_line, on_exit):
             get_display_unit(bpy.context.scene).lower(),
             lang(),
             MAX_TOOL_CALLS,
+            mm_per_bu=mm_per_bu(bpy.context.scene),
         ),
         plugin_dir=str(PLUGIN_DIR),
         read_tools=[tool.name for tool in REGISTRY.values() if tool.kind == "read"],
