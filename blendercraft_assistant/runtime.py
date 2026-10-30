@@ -207,7 +207,8 @@ def _approve(tool_name: str, tool_input: dict) -> tuple[bool, str]:
         try:
             answered = event.wait(APPROVAL_TIMEOUT)
         finally:
-            if pending_approval is not None and pending_approval[2] is event:
+            current = pending_approval  # read once: the main thread may clear it
+            if current is not None and current[2] is event:
                 pending_approval = None
             mainthread.post(tag_redraw)
     if not answered or not answer:
