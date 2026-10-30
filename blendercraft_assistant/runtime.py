@@ -22,14 +22,16 @@ from bpy.app.handlers import persistent
 from . import mainthread
 from .claude.process import TOOL_PREFIX, ClaudeProcess, build_args, find_claude
 from .claude.session import NOTE_KEYS, AgentSession
+from .claude.system_prompt import build_system_prompt
 from .conversations import ConversationStore
-from .i18n import t
+from .i18n import lang, t
 from .mcp.protocol import McpHandler
 from .mcp.server import McpServer
 from .tools import load_all
 from .tools.base import REGISTRY, ToolResult, tools_for_mode
 from .tools.dispatch import call_tool
 from .undo import ChangeTracker
+from .units import get_display_unit
 
 log = logging.getLogger(__name__)
 
@@ -38,13 +40,6 @@ PLUGIN_DIR = Path(__file__).resolve().parent / "plugin"
 WORKSPACE = Path.home() / "Library/Application Support/BlenderCraft/workspace"
 APPROVAL_TIMEOUT = 600.0  # seconds; no answer means deny
 STOP_JOIN_TIMEOUT = 8.0  # seconds stop() waits for Claude processes to end
-
-# Placeholder until the real system prompt builder exists; swap it here.
-SYSTEM_PROMPT = (
-    "You are an assistant embedded in Blender, working on the user's open "
-    "scene through the blendercraft MCP tools. 1 Blender unit = 1 mm. "
-    "Inspect before changing, and keep each change small and described."
-)
 
 _LOGIN_HINTS = ("/login", "not logged in", "invalid api key", "log in")
 
@@ -423,7 +418,11 @@ def _spawn(resume_id, on_line, on_exit):
         token=token,
         mode=mode,
         model=model,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=build_system_prompt(
+            bpy.app.version_string,
+            get_display_unit(bpy.context.scene).lower(),
+            lang(),
+        ),
         plugin_dir=str(PLUGIN_DIR),
         read_tools=[tool.name for tool in REGISTRY.values() if tool.kind == "read"],
         write_tools=[tool.name for tool in REGISTRY.values() if tool.kind != "read"],
