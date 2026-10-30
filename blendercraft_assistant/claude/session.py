@@ -73,7 +73,7 @@ class AgentSession:
         # worked (SessionStarted or a clean TurnFinished).
         self._resume_pending = False
         self._tool_count = 0  # ToolStarted in the current turn
-        self._user_message: Message | None = None
+        self._user_index = 0  # position of the current turn's user message
         self._assistant: Message | None = None
         self._pending: tuple[str, list[dict]] = ("", [])  # current turn's input
 
@@ -130,9 +130,9 @@ class AgentSession:
         conv = self.conversation
         self.error = ""
         self._tool_count = 0
-        self._user_message = Message("user", text)
+        self._user_index = len(conv.messages)
         self._assistant = Message("assistant")
-        conv.messages += [self._user_message, self._assistant]
+        conv.messages += [Message("user", text), self._assistant]
         self._pending = (text, attachments)
         self.status = WORKING
         if self._deliver([{"type": "text", "text": text}, *attachments]):
@@ -178,7 +178,7 @@ class AgentSession:
         conv = self.conversation
         conv.claude_session_id = None
         self._drop_process()
-        history = conv.messages[: conv.messages.index(self._user_message)]
+        history = conv.messages[: self._user_index]
         lines = [
             f"{m.role}: {m.text}" for m in history[-SUMMARY_MESSAGES:] if m.text.strip()
         ]

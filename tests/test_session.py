@@ -397,9 +397,24 @@ class SessionFailureTest(SessionTestBase):
         session.send("q")
         self.exit_process(session, self.procs[0], 1)
         text = self.procs[1].sent[0][0]["text"]
-        self.assertNotIn("m3", text.replace("m13", ""))
-        for i in range(4, 14):
-            self.assertIn(f"m{i}", text)
+        expected = ["Resumo da conversa anterior:"] + [
+            f"{'user' if i % 2 == 0 else 'assistant'}: m{i}" for i in range(4, 14)
+        ]
+        self.assertEqual(text, "\n".join(expected) + "\n\nq")
+
+    def test_fallback_with_repeated_user_text(self):
+        from blendercraft_assistant.conversations import Message
+
+        self.conv.claude_session_id = "abc"
+        self.conv.messages += [Message("user", "sim"), Message("assistant", "certo")]
+        session = self.make()
+        session.send("sim")  # equal (==) to the earlier user message
+        self.exit_process(session, self.procs[0], 1)
+        text = self.procs[1].sent[0][0]["text"]
+        self.assertEqual(
+            text,
+            "Resumo da conversa anterior:\nuser: sim\nassistant: certo\n\nsim",
+        )
 
     def test_no_fallback_after_session_started(self):
         self.conv.claude_session_id = "abc"
