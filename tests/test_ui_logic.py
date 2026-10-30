@@ -161,5 +161,168 @@ class PropsTest(unittest.TestCase):
         self.assertAlmostEqual(self.bc.joint_angle, 45.0)
 
 
+class FakeSession:
+    def __init__(self, queue=()):
+        self.queue = list(queue)
+        self.sent = []
+        self.sent_now = []
+
+    def send(self, text, attachments=()):
+        self.sent.append((text, list(attachments)))
+
+    def send_now(self, text, attachments=()):
+        self.sent_now.append((text, list(attachments)))
+
+
+class OperatorsTest(unittest.TestCase):
+    def setUp(self):
+        from blendercraft_assistant import runtime
+        from blendercraft_assistant.ui import operators, props
+
+        self.runtime = runtime
+        self.operators = operators
+        props.register()
+        self.addCleanup(props.unregister)
+        operators.register()
+        self.addCleanup(operators.unregister)
+        self.bc = bpy.context.window_manager.bc
+        self.session = FakeSession()
+        patcher = mock.patch.object(runtime, "ensure_session", return_value=self.session)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for obj in list(bpy.data.objects):
+            bpy.data.objects.remove(obj, do_unlink=True)
+
+    def add_cube(self, name="Peca", size=10.0):
+        bpy.ops.mesh.primitive_cube_add(size=size)
+        cube = bpy.context.active_object
+        cube.name = name
+        self.addCleanup(lambda: bpy.data.objects.get(name) and bpy.data.objects.remove(bpy.data.objects[name], do_unlink=True))
+        return cube
+
+    def test_input_enter_sends_once_and_clears(self):
+        self.bc.input = "  crie um cubo  "
+        self.assertEqual(self.session.sent, [("crie um cubo", [])])
+        self.assertEqual(self.bc.input, "")
+        self.bc.input = "   "
+        self.assertEqual(len(self.session.sent), 1)
+
+    def test_send_now_promotes_last_queued(self):
+        self.session.queue[:] = [("um", []), ("dois", [{"type": "text", "text": "x"}])]
+        self.assertEqual(bpy.ops.bc.send_now(), {"FINISHED"})
+        self.assertEqual(self.session.sent_now, [("dois", [{"type": "text", "text": "x"}])])
+        self.assertEqual(self.session.queue, [("um", [])])
+
+    def test_send_without_text_does_nothing(self):
+        self.assertEqual(bpy.ops.bc.send(), {"CANCELLED"})
+        self.assertEqual(bpy.ops.bc.send_now(), {"CANCELLED"})
+        self.assertEqual(self.session.sent + self.session.sent_now, [])
+
+    def test_attach_selection(self):
+        self.add_cube("Peca")
+        self.bc.attach_selection = True
+        blocks, warnings = self.operators.build_attachments(bpy.context)
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["type"], "text")
+        self.assertIn('"name": "Peca"', blocks[0]["text"])
+        self.assertIn('"vertices": 8', blocks[0]["text"])
+        self.assertFalse(self.bc.attach_selection)  # only for the next message
+
+    def test_attach_view(self):
+        import base64
+
+        self.add_cube("Peca")
+        self.bc.attach_view = True
+        blocks, warnings = self.operators.build_attachments(bpy.context)
+        self.assertEqual(warnings, [])
+        (block,) = blocks
+        self.assertEqual(block["type"], "image")
+        self.assertEqual(block["source"]["type"], "base64")
+        self.assertEqual(block["source"]["media_type"], "image/png")
+        self.assertTrue(base64.b64decode(block["source"]["data"]).startswith(b"\x89PNG"))
+        self.assertFalse(self.bc.attach_view)
+
+    def test_attach_view_failure_is_a_warning(self):
+        self.bc.attach_view = True  # empty scene: nothing to render
+        blocks, warnings = self.operators.build_attachments(bpy.context)
+        self.assertEqual(blocks, [])
+        self.assertEqual(len(warnings), 1)
+
+    def test_submit_sends_attachments(self):
+        self.add_cube("Peca")
+        self.bc.attach_selection = True
+        self.bc.input = "o que tem aqui?"
+        ((text, attachments),) = self.session.sent
+        self.assertEqual(text, "o que tem aqui?")
+        self.assertIn("Peca", attachments[0]["text"])
+
+    def test_undo_ai_changes(self):
+        from blendercraft_assistant.undo import ChangeTracker, push_step
+
+        bpy.ops.ed.undo_push(message="baseline")
+        tracker = ChangeTracker()
+        with mock.patch.object(self.runtime, "tracker", tracker):
+            self.assertEqual(bpy.ops.bc.undo_ai_changes(), {"CANCELLED"})
+            tracker.begin_turn()
+            self.add_cube("DaIA")
+            push_step("cubo")
+            tracker.record_ai_step()
+            self.assertEqual(bpy.ops.bc.undo_ai_changes(), {"FINISHED"})
+        self.assertNotIn("DaIA", bpy.data.objects)
+
+    def test_set_unit(self):
+        from blendercraft_assistant.units import get_display_unit, set_display_unit
+
+        scene = bpy.context.scene
+        self.addCleanup(set_display_unit, scene, get_display_unit(scene))
+        self.assertEqual(bpy.ops.bc.set_unit(unit="IN"), {"FINISHED"})
+        self.assertEqual(get_display_unit(scene), "IN")
+
+    def test_joint_operators(self):
+        cube = self.add_cube("Tampa", size=10.0)
+        bpy.context.scene.cursor.location = (5.0, 0.0, 0.0)
+        self.addCleanup(setattr, bpy.context.scene.cursor, "location", (0.0, 0.0, 0.0))
+        self.assertEqual(bpy.ops.bc.joint_create(), {"FINISHED"})
+        pivot = bpy.data.objects[self.bc.joint_pivot]
+        self.addCleanup(bpy.data.objects.remove, pivot, do_unlink=True)
+        self.assertIs(cube.parent, pivot)
+        self.assertEqual(pivot["bc_axis"], "Z")
+        self.assertEqual(tuple(pivot.location), (5.0, 0.0, 0.0))
+        # The part (or its pivot) active again picks the same pivot.
+        self.bc.joint_pivot = ""
+        self.assertEqual(bpy.ops.bc.joint_create(), {"FINISHED"})
+        self.assertEqual(self.bc.joint_pivot, pivot.name)
+        self.bc.joint_angle = 40.0
+        self.assertEqual(bpy.ops.bc.joint_test(), {"FINISHED"})
+        self.assertIn("180", self.operators.joint_result)
+        self.assertAlmostEqual(pivot["bc_angle"], 40.0)  # restored by joint_test
+        self.assertEqual(bpy.ops.bc.joint_reset(), {"FINISHED"})
+        self.assertEqual(pivot["bc_angle"], 0.0)
+        self.assertEqual(self.bc.joint_angle, 0.0)
+
+    def test_joint_create_needs_active_object(self):
+        bpy.context.view_layer.objects.active = None
+        self.assertEqual(bpy.ops.bc.joint_create(), {"CANCELLED"})
+
+    def test_toggle_details(self):
+        bpy.ops.bc.toggle_details(tool_id="tu1")
+        self.assertEqual(self.bc.expanded_tool, "tu1")
+        bpy.ops.bc.toggle_details(tool_id="tu2")
+        self.assertEqual(self.bc.expanded_tool, "tu2")
+        bpy.ops.bc.toggle_details(tool_id="tu2")
+        self.assertEqual(self.bc.expanded_tool, "")
+
+    def test_approve(self):
+        with mock.patch.object(self.runtime, "answer_approval") as answer:
+            bpy.ops.bc.approve(allow=True)
+            bpy.ops.bc.approve(allow=False)
+        self.assertEqual([c.args for c in answer.call_args_list], [(True,), (False,)])
+
+    def test_copy_mcp_command_needs_server(self):
+        with mock.patch.object(self.runtime, "server", None):
+            self.assertEqual(bpy.ops.bc.copy_mcp_command(), {"CANCELLED"})
+
+
 if __name__ == "__main__":
     unittest.main()
