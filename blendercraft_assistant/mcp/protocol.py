@@ -53,10 +53,14 @@ class McpHandler:
         approve: Callable[[str, dict], tuple[bool, str]] | None = None,
         name: str = "blendercraft",
         version: str = "0.1.0",
+        # With approve set: whether approve_action is offered right now (the
+        # runtime enables it only in ASK mode). None means always.
+        approval_enabled: Callable[[], bool] | None = None,
     ):
         self._list_tools = list_tools
         self._call = call
         self._approve = approve
+        self._approval_enabled = approval_enabled
         self._name = name
         self._version = version
 
@@ -120,9 +124,14 @@ class McpHandler:
             }
             for t in self._list_tools()
         ]
-        if self._approve is not None:
+        if self._approval_on():
             tools.append(_APPROVAL_DEFINITION)
         return tools
+
+    def _approval_on(self) -> bool:
+        if self._approve is None:
+            return False
+        return self._approval_enabled is None or bool(self._approval_enabled())
 
     def _tools_call(self, name: str, arguments: dict) -> dict:
         if name == APPROVAL_TOOL:
@@ -147,7 +156,7 @@ class McpHandler:
             return _text_result(f"{type(exc).__name__}: {exc}", is_error=True)
 
     def _approval_call(self, arguments: dict) -> dict:
-        if self._approve is None:
+        if not self._approval_on():
             return _text_result(f"Unknown tool: {APPROVAL_TOOL}", is_error=True)
         tool_name = arguments.get("tool_name")
         tool_input = arguments.get("input")

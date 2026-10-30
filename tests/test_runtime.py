@@ -117,6 +117,12 @@ class RuntimeServerTest(RuntimeTestBase):
         reply = rpc("tools/call", {"name": "run_python", "arguments": {"code": "1"}})
         self.assertTrue(reply["result"]["isError"])
 
+    def test_approve_action_listed_only_in_ask_mode(self):
+        for mode, listed in (("AUTO", False), ("READONLY", False), ("ASK", True)):
+            runtime.set_mode(mode)
+            names = {t["name"] for t in rpc("tools/list")["result"]["tools"]}
+            self.assertEqual("approve_action" in names, listed, mode)
+
     def test_tool_call_runs_on_main_thread_as_ai_step(self):
         before = len(bpy.data.objects)
         thread, box = rpc_in_thread(

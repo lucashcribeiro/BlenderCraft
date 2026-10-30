@@ -82,7 +82,9 @@ def start() -> None:
             store = ConversationStore()
         mainthread.install_timer()
         _add_handlers()
-        handler = McpHandler(_list_tools, _call, _approve)
+        handler = McpHandler(
+            _list_tools, _call, _approve, approval_enabled=lambda: mode == "ASK"
+        )
         port = _pref("external_port", 0)
         try:
             srv = McpServer(handler, token, port)

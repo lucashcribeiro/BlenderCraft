@@ -55,6 +55,34 @@ def _rpc(method, params=None, id=1):
     return msg
 
 
+class ApprovalEnabledTest(unittest.TestCase):
+    def _handler(self, enabled):
+        state = {"on": enabled}
+        handler = McpHandler(
+            lambda: [_tool("echo")],
+            _call,
+            lambda name, args: (True, ""),
+            approval_enabled=lambda: state["on"],
+        )
+        return handler, state
+
+    def _names(self, handler):
+        out = handler.handle(_rpc("tools/list"))
+        return [t["name"] for t in out["result"]["tools"]]
+
+    def test_listed_and_callable_only_while_enabled(self):
+        handler, state = self._handler(False)
+        self.assertEqual(self._names(handler), ["echo"])
+        call = _rpc(
+            "tools/call",
+            {"name": APPROVAL_TOOL, "arguments": {"tool_name": "t", "input": {}}},
+        )
+        self.assertTrue(handler.handle(call)["result"]["isError"])
+        state["on"] = True
+        self.assertEqual(self._names(handler), ["echo", APPROVAL_TOOL])
+        self.assertFalse(handler.handle(call)["result"]["isError"])
+
+
 class ProtocolTest(unittest.TestCase):
     def test_initialize(self):
         out = _handler().handle(_rpc("initialize", {"protocolVersion": "2024-11-05"}))
