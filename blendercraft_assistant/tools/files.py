@@ -32,18 +32,28 @@ def _run_operator(op, **kwargs) -> None:
         raise RuntimeError(f"{op.idname()} did not finish: {sorted(result)}")
 
 
-def _select_only(objs: list) -> None:
+def _select_only(objs: list, strict: bool = True) -> None:
+    """Select exactly objs and make the first one active.
+
+    strict (exports): an object that refuses selection raises, because the
+    exporter would silently skip it. Otherwise (imports) it is left alone.
+    """
     view_layer = bpy.context.view_layer
     for o in view_layer.objects:
         o.select_set(False)
+    selected = []
     for o in objs:
-        o.select_set(True)
-        # Hidden objects silently refuse selection and would be skipped by
-        # the exporter, leaving an empty file.
-        if not o.select_get():
+        try:
+            o.select_set(True)
+            ok = o.select_get()
+        except RuntimeError:  # not in the view layer
+            ok = False
+        if ok:
+            selected.append(o)
+        elif strict:
             raise ValueError(f"Object cannot be selected (hidden?): {o.name}")
-    if objs:
-        view_layer.objects.active = objs[0]
+    if selected:
+        view_layer.objects.active = selected[0]
 
 
 @contextmanager
@@ -217,7 +227,7 @@ def _import_file(args: dict):
     # New bases only show up in the view layer after an update.
     bpy.context.view_layer.update()
     # The importers disagree about selection; leave the new objects selected.
-    _select_only(created)
+    _select_only(created, strict=False)
     return json_result(
         {
             "path": str(path),

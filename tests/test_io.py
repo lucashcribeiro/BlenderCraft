@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 from xml.etree import ElementTree as ET
 
 import bmesh
@@ -407,6 +408,23 @@ class Import3mfTest(IoTestBase):
         self.assertTrue(result.is_error)
         self.assertIn("mesh", result.text)
         self.assertEqual(len(bpy.data.objects), 0)
+
+    def test_unselectable_new_objects_do_not_fail_the_import(self):
+        from blendercraft_assistant.tools import files
+
+        def make_hidden(path, mm):
+            obj = _cube("Ghost", 20.0)
+            obj.hide_viewport = True  # such an object refuses selection
+            return [obj]
+
+        path = self.dir / "any.3mf"
+        _write_model(path, "millimeter", "<resources/>")
+        with mock.patch.object(files, "import_3mf", make_hidden):
+            result = call_tool("import_file", {"path": str(path)})
+        self.assertFalse(result.is_error, result.text)
+        self.assertEqual(
+            [o["name"] for o in json.loads(result.text)["objects"]], ["Ghost"]
+        )
 
     def test_unknown_unit_is_error(self):
         path = self.dir / "bad.3mf"
