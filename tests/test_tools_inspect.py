@@ -17,6 +17,7 @@ from blendercraft_assistant.tools.base import (
     truncate,
 )
 from blendercraft_assistant.tools import dispatch
+from blendercraft_assistant.tools import inspect as inspect_tools
 from blendercraft_assistant.tools.dispatch import call_tool
 from blendercraft_assistant.undo import ChangeTracker
 
@@ -266,6 +267,53 @@ class InspectTest(unittest.TestCase):
         self.assertIn("mm", data["min_gap"])
         dist = float(data["distance_between_origins"].split()[0])
         self.assertAlmostEqual(dist, 25.0, delta=0.01)
+
+    def _gap_mm(self, a, b):
+        data = json.loads(call_tool("measure", {"a": a, "b": b}).text)
+        return data, float(data["min_gap"].split()[0])
+
+    def test_measure_gap_crossed_bars(self):
+        # Vertex-to-surface sampling alone reports ~4.9 here; the true gap
+        # is edge against edge: B's bottom at z=2.5, A's top at z=0.5.
+        bar_a = _add_cube("A", 1.0)
+        bar_a.scale = (10.0, 1.0, 1.0)
+        bar_b = _add_cube("B", 1.0)
+        bar_b.scale = (10.0, 1.0, 1.0)
+        bar_b.rotation_euler = Euler((0.0, 0.0, math.pi / 2))
+        bar_b.location = (0.0, 0.0, 3.0)
+        bpy.context.view_layer.update()
+        data, gap = self._gap_mm("A", "B")
+        self.assertAlmostEqual(gap, 2.0, delta=0.01)
+        self.assertFalse(data.get("approximate", False))
+
+    def test_measure_gap_rotated_boxes_edge_against_edge(self):
+        # Cube edges along X (A, rotated 45 deg about X) and along Y (B,
+        # rotated 45 deg about Y) cross at the origin axis: gap h - 2*sqrt(2).
+        a = _add_cube("A", 2.0)
+        a.rotation_euler = Euler((math.pi / 4, 0.0, 0.0))
+        b = _add_cube("B", 2.0)
+        b.rotation_euler = Euler((0.0, math.pi / 4, 0.0))
+        b.location = (0.0, 0.0, 2 * math.sqrt(2) + 3.0)
+        bpy.context.view_layer.update()
+        _data, gap = self._gap_mm("A", "B")
+        self.assertAlmostEqual(gap, 3.0, delta=0.01)
+
+    def test_measure_gap_parallel_edges(self):
+        _add_cube("A", 2.0, x_mm=0.0)
+        b = _add_cube("B", 2.0, x_mm=5.0)
+        b.location.y = 4.0  # offset along the shared edge direction too
+        bpy.context.view_layer.update()
+        _data, gap = self._gap_mm("A", "B")
+        self.assertAlmostEqual(gap, math.hypot(3.0, 2.0), delta=0.01)
+
+    def test_measure_gap_large_meshes_flag_approximate(self):
+        _add_cube("A", 20.0, x_mm=0.0)
+        _add_cube("B", 20.0, x_mm=25.0)
+        with mock.patch.object(inspect_tools, "_EDGE_PAIR_LIMIT", 1):
+            data, gap = self._gap_mm("A", "B")
+        self.assertTrue(data["approximate"])
+        self.assertIn("approximate", data["note"])
+        self.assertAlmostEqual(gap, 5.0, delta=0.01)
 
     def test_measure_gap_without_geometry_is_null(self):
         _add_cube("A", 20.0)

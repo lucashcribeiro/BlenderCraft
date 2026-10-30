@@ -10,6 +10,10 @@ from mathutils.bvhtree import BVHTree
 from ..units import display_scale_and_suffix, format_length, get_display_unit
 from .base import Tool, json_result, register_tool
 
+# Above this many edge pairs the exact edge-edge search is skipped.
+_EDGE_PAIR_LIMIT = 2_000_000
+
+
 def _fmt(values, scene) -> list[str]:
     return [format_length(v, scene) for v in values]
 
@@ -106,23 +110,83 @@ def _bvh(bm) -> BVHTree:
     return BVHTree.FromBMesh(bm)
 
 
-def _min_gap(bm_a, bm_b) -> float | None:
-    """Smallest distance between two meshes, in BU (0 when they overlap).
+def _segment_distance(p1, q1, p2, q2) -> float:
+    """Closest distance between segments p1-q1 and p2-q2 (Ericson 5.1.9)."""
+    d1, d2, r = q1 - p1, q2 - p2, p1 - p2
+    a, e, f = d1.dot(d1), d2.dot(d2), d2.dot(r)
+    eps = 1e-12
+    if a <= eps and e <= eps:
+        return r.length
+    if a <= eps:
+        s, t = 0.0, min(max(f / e, 0.0), 1.0)
+    else:
+        c = d1.dot(r)
+        if e <= eps:
+            s, t = min(max(-c / a, 0.0), 1.0), 0.0
+        else:
+            b = d1.dot(d2)
+            denom = a * e - b * b
+            # Parallel segments (denom == 0): pick any s, t is fixed below.
+            s = min(max((b * f - c * e) / denom, 0.0), 1.0) if denom > eps else 0.0
+            t = (b * s + f) / e
+            if t < 0.0:
+                t, s = 0.0, min(max(-c / a, 0.0), 1.0)
+            elif t > 1.0:
+                t, s = 1.0, min(max((b - c) / a, 0.0), 1.0)
+    return ((p1 + d1 * s) - (p2 + d2 * t)).length
 
-    Takes the nearest point on the other mesh's BVH for every vertex of each
-    mesh. Exact for vertex-to-surface closest pairs; it can overestimate
-    when the closest pair is edge against edge.
+
+def _edge_gap(bm_a, bm_b, best: float) -> float:
+    """Smallest edge-to-edge distance, never above ``best``.
+
+    Edge pairs whose bounding boxes are already farther apart than the best
+    distance found so far are skipped.
+    """
+    def boxes(bm):
+        out = []
+        for e in bm.edges:
+            p, q = e.verts[0].co.copy(), e.verts[1].co.copy()
+            lo = tuple(min(p[i], q[i]) for i in range(3))
+            hi = tuple(max(p[i], q[i]) for i in range(3))
+            out.append((lo, hi, p, q))
+        return out
+
+    boxes_a, boxes_b = boxes(bm_a), boxes(bm_b)
+    for lo_a, hi_a, p1, q1 in boxes_a:
+        for lo_b, hi_b, p2, q2 in boxes_b:
+            sq = 0.0
+            for i in range(3):
+                d = max(lo_a[i] - hi_b[i], lo_b[i] - hi_a[i], 0.0)
+                sq += d * d
+            if sq >= best * best:
+                continue
+            best = min(best, _segment_distance(p1, q1, p2, q2))
+    return best
+
+
+def _min_gap(bm_a, bm_b) -> tuple[float | None, bool]:
+    """Smallest distance between two meshes in BU, and whether it is approximate.
+
+    0 when the surfaces overlap. Otherwise the minimum of vertex-to-surface
+    distances (BVH) both ways and edge-to-edge distances. The edge-to-edge
+    search is skipped above _EDGE_PAIR_LIMIT edge pairs, which makes the
+    result approximate (it can overestimate). None when there is no geometry.
     """
     tree_a, tree_b = _bvh(bm_a), _bvh(bm_b)
     if tree_a.overlap(tree_b):
-        return 0.0
+        return 0.0, False
     best = math.inf
     for verts, tree in ((bm_a.verts, tree_b), (bm_b.verts, tree_a)):
         for v in verts:
             hit = tree.find_nearest(v.co)
             if hit and hit[3] is not None:
                 best = min(best, hit[3])
-    return None if best == math.inf else best
+    approximate = len(bm_a.edges) * len(bm_b.edges) > _EDGE_PAIR_LIMIT
+    if not approximate and bm_a.edges and bm_b.edges:
+        best = _edge_gap(bm_a, bm_b, best)
+    if best == math.inf:
+        return None, False
+    return best, approximate
 
 
 def _with_unit(value: float, suffix: str, power: str) -> str:
@@ -152,7 +216,7 @@ def _measure(args: dict):
     b = _get_object(str(b_name))
     bm_a, bm_b = _evaluated_world_mesh(a), _evaluated_world_mesh(b)
     try:
-        gap = _min_gap(bm_a, bm_b)
+        gap, approximate = _min_gap(bm_a, bm_b)
     finally:
         bm_a.free()
         bm_b.free()
@@ -163,6 +227,12 @@ def _measure(args: dict):
     }
     if gap is None:
         result["note"] = "min_gap unavailable: a mesh has no geometry"
+    elif approximate:
+        result["approximate"] = True
+        result["note"] = (
+            "min_gap is approximate: the meshes are too large for the exact "
+            "edge-to-edge search, so it may overestimate"
+        )
     return json_result(result)
 
 
@@ -203,7 +273,9 @@ register_tool(
         description=(
             "Measure objects. With only a: dimensions, volume and surface "
             "area. With a and b: distance between origins and the minimum gap "
-            "between the evaluated meshes (0 when they touch or overlap)."
+            "between the evaluated meshes (0 when they touch or overlap). The gap is "
+            "exact unless the meshes have more than 2 million edge pairs; then "
+            "the result carries \"approximate\": true and may overestimate."
         ),
         input_schema={
             "type": "object",
