@@ -225,6 +225,18 @@ class SessionQueueTest(SessionTestBase):
         self.assertEqual(session.status, "WORKING")
         self.assertEqual([m.role for m in self.conv.messages], ["user", "assistant", "user", "assistant"])
 
+    def test_on_turn_begin_called_for_each_turn(self):
+        calls = []
+        session = self.make(on_turn_begin=lambda: calls.append(len(self.conv.messages)))
+        session.send("um")
+        self.assertEqual(calls, [0])
+        session.send("dois")  # queued: its turn has not begun
+        self.assertEqual(calls, [0])
+        self.feed_fixture(session, "text_turn")
+        self.assertEqual(calls, [0, 2])  # the queued turn began
+        session.send_now("agora")
+        self.assertEqual(calls, [0, 2, 4])
+
     def test_queue_keeps_attachments(self):
         session = self.make()
         image = {"type": "image"}

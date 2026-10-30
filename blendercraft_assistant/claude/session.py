@@ -66,6 +66,9 @@ class AgentSession:
         tool_kinds: Callable[[str], str],  # tool name -> "read" | "scene" | "file"
         max_tool_calls: int = 40,
         notes: dict[str, str] | None = None,
+        # Called whenever a user turn is sent to Claude, queued ones included
+        # (the runtime resets the undo tracker there).
+        on_turn_begin: Callable[[], None] | None = None,
     ):
         self.conversation = conversation
         self.store = store
@@ -73,6 +76,7 @@ class AgentSession:
         self._tool_kinds = tool_kinds
         self.max_tool_calls = max_tool_calls
         self._notes = {**_DEFAULT_NOTES, **(notes or {})}
+        self._on_turn_begin = on_turn_begin
 
         self.status = IDLE
         self.queue: list[tuple[str, list[dict]]] = []
@@ -158,6 +162,8 @@ class AgentSession:
     # ---- turns ------------------------------------------------------
 
     def _begin_turn(self, text: str, attachments: list[dict]) -> None:
+        if self._on_turn_begin is not None:
+            self._on_turn_begin()
         conv = self.conversation
         self.error = ""
         self._tool_count = 0
