@@ -89,9 +89,10 @@ def _draw_tool(layout, context, tool, props) -> None:
         text=f"{tool.name}: {summary}" if summary else tool.name,
         icon=_TOOL_ICONS.get(tool.status, "QUESTION"),
     )
+    # Icon only (tooltip "Details"): a text button would squeeze the name.
     op = row.operator(
         "bc.toggle_details",
-        text=t("details"),
+        text="",
         icon="DISCLOSURE_TRI_DOWN" if expanded else "DISCLOSURE_TRI_RIGHT",
         emboss=False,
     )
