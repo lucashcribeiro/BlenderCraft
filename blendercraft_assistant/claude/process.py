@@ -104,6 +104,7 @@ def build_args(
         "--mcp-config", json.dumps(mcp_config),
         "--strict-mcp-config",
         "--tools", "",
+        "--setting-sources", "",
         "--append-system-prompt", system_prompt,
         "--plugin-dir", plugin_dir,
     ]

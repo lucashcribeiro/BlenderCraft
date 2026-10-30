@@ -175,6 +175,8 @@ class BuildArgsTest(unittest.TestCase):
             ("--input-format", "stream-json"),
             ("--output-format", "stream-json"),
             ("--tools", ""),
+            # Empty: the user's own hooks, plugins and settings stay out.
+            ("--setting-sources", ""),
             ("--append-system-prompt", "SYS"),
             ("--plugin-dir", "/plug"),
         ]:
