@@ -58,10 +58,23 @@ def hex_to_linear(value: str) -> tuple[float, float, float, float]:
     return (*rgb, channels[3] if len(channels) == 4 else 1.0)
 
 
+def _material_color(mat):
+    """Linear RGB of a material: Principled base color, else viewport color."""
+    if mat.use_nodes and mat.node_tree is not None:
+        for node in mat.node_tree.nodes:
+            if node.type == "BSDF_PRINCIPLED":
+                base = node.inputs["Base Color"]
+                # A texture or other link has no single color to export.
+                if not base.is_linked:
+                    return base.default_value
+                break
+    return mat.diffuse_color
+
+
 def _object_color(obj) -> str:
     for slot in obj.material_slots:
         if slot.material is not None:
-            return linear_to_hex(slot.material.diffuse_color)
+            return linear_to_hex(_material_color(slot.material))
     return DEFAULT_COLOR
 
 

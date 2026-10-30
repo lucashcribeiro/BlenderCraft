@@ -69,6 +69,11 @@ def _cube(name, size, color=None, location=(0.0, 0.0, 0.0)):
     if color is not None:
         mat = bpy.data.materials.new(f"{name}_mat")
         mat.diffuse_color = color
+        # New materials already carry a Principled node (base color 0.8 grey),
+        # which is what renders; keep it in step with the viewport color.
+        if mat.use_nodes:
+            bsdf = next(n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED")
+            bsdf.inputs["Base Color"].default_value = color
         mesh.materials.append(mat)
     bpy.context.view_layer.update()
     return obj
@@ -196,6 +201,29 @@ class Export3mfTest(IoTestBase):
         self.assertEqual(
             [b.get("displaycolor") for b in bases], ["#CCCCCC", "#808080"]
         )
+
+    def test_3mf_uses_principled_base_color(self):
+        obj = _cube("Node", 10.0, (0.8, 0.8, 0.8, 1.0))
+        mat = obj.data.materials[0]
+        bsdf = next(n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED")
+        bsdf.inputs["Base Color"].default_value = (0.0, 1.0, 0.0, 1.0)
+        path = self.export("n.3mf", objects=["Node"])
+        _, root = _read_3mf(path)
+        (base,) = root.findall(f"{CORE}resources/{CORE}basematerials/{CORE}base")
+        self.assertEqual(base.get("displaycolor"), "#00FF00")
+
+    def test_3mf_linked_base_color_falls_back_to_diffuse(self):
+        obj = _cube("Linked", 10.0, (1.0, 0.0, 0.0, 1.0))
+        mat = obj.data.materials[0]
+        mat.use_nodes = True
+        nodes, links = mat.node_tree.nodes, mat.node_tree.links
+        bsdf = next(n for n in nodes if n.type == "BSDF_PRINCIPLED")
+        rgb = nodes.new("ShaderNodeRGB")
+        links.new(rgb.outputs["Color"], bsdf.inputs["Base Color"])
+        path = self.export("l.3mf", objects=["Linked"])
+        _, root = _read_3mf(path)
+        (base,) = root.findall(f"{CORE}resources/{CORE}basematerials/{CORE}base")
+        self.assertEqual(base.get("displaycolor"), "#FF0000")
 
     def test_3mf_applies_modifiers(self):
         obj = _cube("Mod", 20.0)
