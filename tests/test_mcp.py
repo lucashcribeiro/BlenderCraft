@@ -357,6 +357,30 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, 404)
         cm.exception.close()
 
+    def test_lone_surrogate_roundtrips(self):
+        server = McpServer(_handler(lambda n, i: (False, "\ud800")), token="TOKEN")
+        server.start()
+        self.addCleanup(server.stop)
+        body = _rpc(
+            "tools/call",
+            {"name": APPROVAL_TOOL, "arguments": {"tool_name": "t", "input": {}}},
+        )
+        status, _, raw = _post(server, body)
+        self.assertEqual(status, 200)
+        text = json.loads(raw)["result"]["content"][0]["text"]
+        self.assertEqual(json.loads(text)["message"], "\ud800")
+
+    def test_unserializable_reply_is_500_with_jsonrpc_error(self):
+        bad = Tool("bad", "d", {"x": {1, 2}}, lambda a: ToolResult(""), "read")
+        server = McpServer(McpHandler(lambda: [bad], _call), token="TOKEN")
+        server.start()
+        self.addCleanup(server.stop)
+        status, _, raw = _post(server, _rpc("tools/list", id=7))
+        self.assertEqual(status, 500)
+        payload = json.loads(raw)
+        self.assertEqual(payload["error"]["code"], -32603)
+        self.assertEqual(payload["id"], 7)
+
     def test_stop_twice_is_safe(self):
         self.server.stop()
         self.server.stop()

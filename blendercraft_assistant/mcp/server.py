@@ -50,7 +50,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _send_json(self, status: int, payload: dict, headers: dict | None = None):
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        try:
+            # ASCII-only output cannot fail on lone surrogates in tool text.
+            body = json.dumps(payload).encode("ascii")
+        except (TypeError, ValueError) as exc:
+            status = 500
+            body = json.dumps(
+                error_response(
+                    payload.get("id"), -32603, f"Could not serialize reply: {exc}"
+                )
+            ).encode("ascii")
         merged = {"Content-Type": "application/json"}
         merged.update(headers or {})
         self._send(status, body, merged)
