@@ -282,13 +282,29 @@ class OperatorsTest(unittest.TestCase):
         bpy.ops.ed.undo_push(message="baseline")
         tracker = ChangeTracker()
         with mock.patch.object(self.runtime, "tracker", tracker):
-            self.assertEqual(bpy.ops.bc.undo_ai_changes(), {"CANCELLED"})
+            # Nothing of the AI to undo: the button is disabled.
+            self.assertFalse(bpy.ops.bc.undo_ai_changes.poll())
             tracker.begin_turn()
             self.add_cube("DaIA")
             push_step("cubo")
             tracker.record_ai_step()
             self.assertEqual(bpy.ops.bc.undo_ai_changes(), {"FINISHED"})
         self.assertNotIn("DaIA", bpy.data.objects)
+
+    def test_undo_ai_changes_after_manual_edit(self):
+        from blendercraft_assistant.undo import ChangeTracker
+
+        class _Depsgraph:
+            updates = [object()]
+
+        tracker = ChangeTracker()
+        tracker.begin_turn()
+        tracker.record_ai_step()
+        tracker.on_depsgraph_update(bpy.context.scene, _Depsgraph())  # the user's edit
+        with mock.patch.object(self.runtime, "tracker", tracker):
+            self.assertTrue(bpy.ops.bc.undo_ai_changes.poll())
+            self.assertEqual(bpy.ops.bc.undo_ai_changes(), {"CANCELLED"})
+        self.assertEqual(tracker.ai_steps, 1)  # nothing was undone
 
     def test_set_unit(self):
         from blendercraft_assistant.units import get_display_unit, set_display_unit

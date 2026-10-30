@@ -57,6 +57,11 @@ class ChangeTracker:
             self._manual_edit = True
             return
 
+    @property
+    def ai_steps(self) -> int:
+        """AI undo steps recorded since the current turn began."""
+        return self._ai_steps
+
     def can_undo_last_turn(self) -> bool:
         return self._ai_steps > 0 and not self._manual_edit
 

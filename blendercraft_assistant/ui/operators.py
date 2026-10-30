@@ -216,8 +216,12 @@ class BC_OT_undo_ai_changes(Operator):
 
     @classmethod
     def poll(cls, context):
+        # Disabled while the agent works and when the AI has nothing to undo.
         session = runtime.session
-        return session is None or session.status != "WORKING"
+        if session is not None and session.status == "WORKING":
+            return False
+        tracker = runtime.tracker
+        return tracker is not None and tracker.ai_steps > 0
 
     def execute(self, context):
         tracker = runtime.tracker
