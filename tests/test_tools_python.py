@@ -1,3 +1,6 @@
+import contextlib
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -150,6 +153,26 @@ class RunPythonTest(unittest.TestCase):
         self.assertIn("undo", res.text.lower())
 
 
+@contextlib.contextmanager
+def _quiet_fd_stdout():
+    """Silence Blender's C-level "Info: Saved ..." lines (test output only)."""
+    sys.stdout.flush()
+    saved = os.dup(1)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull, 1)
+        yield
+    finally:
+        os.dup2(saved, 1)
+        os.close(saved)
+        os.close(devnull)
+
+
+def _save(args):
+    with _quiet_fd_stdout():
+        return call_tool("save", args)
+
+
 class SaveTest(unittest.TestCase):
     def setUp(self):
         # Start from an unsaved file.
@@ -157,30 +180,30 @@ class SaveTest(unittest.TestCase):
         self.assertEqual(bpy.data.filepath, "")
 
     def test_save_requires_path(self):
-        res = call_tool("save", {})
+        res = _save({})
         self.assertTrue(res.is_error)
         self.assertIn("path", res.text.lower())
 
     def test_save_with_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "model.blend"
-            res = call_tool("save", {"path": str(target)})
+            res = _save({"path": str(target)})
             self.assertFalse(res.is_error, res.text)
             self.assertTrue(target.exists())
             self.assertIn(str(target), res.text)
 
     def test_save_adds_blend_extension(self):
         with tempfile.TemporaryDirectory() as tmp:
-            res = call_tool("save", {"path": str(Path(tmp) / "model")})
+            res = _save({"path": str(Path(tmp) / "model")})
             self.assertFalse(res.is_error, res.text)
             self.assertTrue((Path(tmp) / "model.blend").exists())
 
     def test_save_without_path_uses_current_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "model.blend"
-            call_tool("save", {"path": str(target)})
+            _save({"path": str(target)})
             target.unlink()
-            res = call_tool("save", {})
+            res = _save({})
             self.assertFalse(res.is_error, res.text)
             self.assertTrue(target.exists())
 
