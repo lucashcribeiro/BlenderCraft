@@ -7,6 +7,7 @@ run on server threads and only touch plain Python state or go through
 mainthread.
 """
 
+import hashlib
 import json
 import logging
 import secrets
@@ -26,7 +27,7 @@ from .i18n import t
 from .mcp.protocol import McpHandler
 from .mcp.server import McpServer
 from .tools import load_all
-from .tools.base import REGISTRY, tools_for_mode
+from .tools.base import REGISTRY, ToolResult, tools_for_mode
 from .tools.dispatch import call_tool
 from .undo import ChangeTracker
 
@@ -63,6 +64,10 @@ _approval_lock = threading.Lock()
 # Bumped by every Stop-like action (_deny_pending). A request that started
 # under an older epoch was meant for work that has been cancelled.
 _approval_epoch = 0
+# ASK mode, enforced here too: each allowed approval is a one-shot permit
+# for that tool with that exact input, keyed by (name, input hash).
+_permits: dict[tuple[str, str], int] = {}
+_permits_lock = threading.Lock()
 _stoppers: list[threading.Thread] = []
 
 
@@ -195,7 +200,46 @@ def _list_tools():
 
 
 def _call(name: str, args: dict):
+    if mode == "ASK" and _tool_kind(name) != "read" and not _consume_permit(name, args):
+        return ToolResult(
+            text=(
+                f"approval required: {name} changes the scene or writes files and "
+                "the user has not approved this call."
+            ),
+            is_error=True,
+        )
     return mainthread.run_on_main(lambda: call_tool(name, args, tracker))
+
+
+def _permit_key(name: str, args: dict) -> tuple[str, str]:
+    canonical = json.dumps(
+        args, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+    )
+    return name, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _grant_permit(name: str, args: dict) -> None:
+    key = _permit_key(name, args)
+    with _permits_lock:
+        _permits[key] = _permits.get(key, 0) + 1
+
+
+def _consume_permit(name: str, args: dict) -> bool:
+    key = _permit_key(name, args)
+    with _permits_lock:
+        count = _permits.get(key, 0)
+        if count <= 0:
+            return False
+        if count == 1:
+            del _permits[key]
+        else:
+            _permits[key] = count - 1
+        return True
+
+
+def _clear_permits() -> None:
+    with _permits_lock:
+        _permits.clear()
 
 
 def _approve(tool_name: str, tool_input: dict) -> tuple[bool, str]:
@@ -231,7 +275,12 @@ def _approve(tool_name: str, tool_input: dict) -> tuple[bool, str]:
         _approval_lock.release()
     if not answered or not answer:
         return False, "The user did not answer in time."
-    return answer[0]
+    allowed, reason = answer[0]
+    if allowed:
+        if epoch != _approval_epoch:  # stopped right after the user approved
+            return cancelled
+        _grant_permit(name, tool_input)
+    return allowed, reason
 
 
 def answer_approval(allow: bool) -> None:
@@ -244,6 +293,7 @@ def _deny_pending(reason: str) -> None:
     """Deny the request on screen and cancel those queued behind it."""
     global _approval_epoch
     _approval_epoch += 1
+    _clear_permits()  # approvals were for the work being cancelled
     _resolve_pending(False, reason)
 
 

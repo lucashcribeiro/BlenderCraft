@@ -161,6 +161,81 @@ class RuntimeServerTest(RuntimeTestBase):
         )
 
 
+CUBE_ARGS = {"code": "bpy.ops.mesh.primitive_cube_add(size=4)", "description": "cubo"}
+
+
+class RuntimeAskEnforcementTest(RuntimeTestBase):
+    def setUp(self):
+        super().setUp()
+        runtime.set_mode("ASK")
+        self.before = len(bpy.data.objects)
+        self.addCleanup(self.remove_new_objects)
+
+    def remove_new_objects(self):
+        while len(bpy.data.objects) > self.before:
+            bpy.data.objects.remove(bpy.data.objects[-1], do_unlink=True)
+
+    def call(self, name, args):
+        thread, box = rpc_in_thread("tools/call", {"name": name, "arguments": args})
+        self.assertTrue(pump_until(lambda: not thread.is_alive()))
+        self.assertNotIn("error", box)
+        return box["reply"]["result"]
+
+    def grant(self, name, args, allow=True):
+        box = {}
+
+        def worker():
+            box["decision"] = runtime._approve(f"mcp__blendercraft__{name}", args)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        self.assertTrue(pump_until(lambda: runtime.pending_approval is not None))
+        runtime.answer_approval(allow)
+        thread.join(5)
+        return box["decision"]
+
+    def test_write_call_without_permit_is_refused(self):
+        result = self.call("run_python", CUBE_ARGS)
+        self.assertTrue(result["isError"])
+        self.assertIn("approval required", result["content"][0]["text"])
+        self.assertEqual(len(bpy.data.objects), self.before)
+
+    def test_permit_runs_once(self):
+        self.assertTrue(self.grant("run_python", dict(reversed(list(CUBE_ARGS.items()))))[0])
+        result = self.call("run_python", CUBE_ARGS)  # same input, other key order
+        self.assertFalse(result["isError"], result)
+        self.assertEqual(len(bpy.data.objects), self.before + 1)
+        again = self.call("run_python", CUBE_ARGS)
+        self.assertTrue(again["isError"])
+        self.assertEqual(len(bpy.data.objects), self.before + 1)
+
+    def test_permit_is_for_that_input_only(self):
+        self.grant("run_python", CUBE_ARGS)
+        other = dict(CUBE_ARGS, code="bpy.ops.mesh.primitive_cube_add(size=8)")
+        self.assertTrue(self.call("run_python", other)["isError"])
+        self.assertTrue(self.call("save", {})["isError"])  # file tools too
+
+    def test_denied_request_gives_no_permit(self):
+        self.assertFalse(self.grant("run_python", CUBE_ARGS, allow=False)[0])
+        self.assertTrue(self.call("run_python", CUBE_ARGS)["isError"])
+
+    def test_read_tools_need_no_permit(self):
+        self.assertFalse(self.call("inspect_scene", {})["isError"])
+
+    def test_permits_cleared_on_stop_and_mode_change(self):
+        self.grant("run_python", CUBE_ARGS)
+        runtime.stop_session()
+        self.assertTrue(self.call("run_python", CUBE_ARGS)["isError"])
+        self.grant("run_python", CUBE_ARGS)
+        runtime.set_mode("AUTO")
+        runtime.set_mode("ASK")
+        self.assertTrue(self.call("run_python", CUBE_ARGS)["isError"])
+
+    def test_auto_mode_needs_no_permit(self):
+        runtime.set_mode("AUTO")
+        self.assertFalse(self.call("run_python", CUBE_ARGS)["isError"])
+
+
 class RuntimeApprovalTest(RuntimeTestBase):
     def ask(self):
         box = {}
