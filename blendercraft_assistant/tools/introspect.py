@@ -25,6 +25,8 @@ def _list_operators(args: dict):
     query = str(args["query"]).lower()
     limit = int(args.get("limit", 30))
     found = []
+    if limit <= 0:
+        return json_result(found)
     for op_id, rna in _iter_operators():
         label, description = rna.name, rna.description
         haystack = f"{op_id} {label} {description}".lower()

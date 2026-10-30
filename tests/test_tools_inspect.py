@@ -146,6 +146,11 @@ class IntrospectTest(unittest.TestCase):
         res = call_tool("list_operators", {"query": "mesh", "limit": 3})
         self.assertEqual(len(json.loads(res.text)), 3)
 
+    def test_list_operators_nonpositive_limit_is_empty(self):
+        for limit in (0, -5):
+            res = call_tool("list_operators", {"query": "mesh", "limit": limit})
+            self.assertEqual(json.loads(res.text), [])
+
     def test_describe_bevel_has_width(self):
         # Blender 5.2 renamed mesh.bevel's "width" to "offset".
         res = call_tool("describe_operator", {"id": "mesh.bevel"})
