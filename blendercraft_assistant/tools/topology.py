@@ -126,7 +126,9 @@ def print_check(
 
         # Overhangs: faces looking down, unless they sit on the bed.
         lowest = min((v.co.z for v in bm.verts), default=0.0)
-        limit = -math.cos(math.radians(overhang_deg))
+        # overhang_deg is measured from vertical (slicer convention): a face
+        # leaning more than that while facing down has normal.z < -sin(angle).
+        limit = -math.sin(math.radians(overhang_deg))
         contact = _BED_CONTACT_MM / mm
         overhangs = [
             f
@@ -184,11 +186,13 @@ register_tool(
         name="print_check",
         description=(
             "3D-print checks on the evaluated world-space mesh. thin_faces "
-            "counts faces whose wall (distance from the face center inward "
+            "counts faces whose wall (distance from the face surface inward "
             "to the next surface) is under min_wall_mm; min_wall_mm in the "
             "result is the thinnest wall found. overhang_faces and "
-            "overhang_area_mm2 cover faces tilted past overhang_deg from "
-            "vertical, ignoring faces resting on the bed (lowest Z). "
+            "overhang_area_mm2 cover downward-facing faces that lean more "
+            "than overhang_deg from vertical (slicer convention: 0 flags "
+            "every downward face, 90 only a face pointing straight down), "
+            "ignoring faces resting on the bed (lowest Z). "
             "below_bed_mm is how far the object sinks under Z = 0. "
             "Distances are in mm; min_wall_mm defaults to 0.8 and "
             "overhang_deg to 45."

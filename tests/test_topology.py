@@ -215,7 +215,9 @@ class PrintCheckTest(TopologyTestBase):
         self.assertGreater(info["overhang_area_mm2"], 0)
 
     def test_overhang_angle_threshold(self):
-        # A plate tilted 30 degrees from horizontal overhangs at 45 but not at 20.
+        # overhang_deg is measured from vertical (slicer convention). A plate tilted
+        # 30 degrees from horizontal leans 60 degrees from vertical: it is an
+        # overhang at 45 but not at 70.
         def build(bm):
             _cube(bm, 20, center=(0, 0, 10))
             tilt = Matrix.Translation((20, 0, 10)) @ Matrix.Rotation(
@@ -225,7 +227,7 @@ class PrintCheckTest(TopologyTestBase):
 
         _make_object("Tilt", build)
         self.assertGreater(topology.print_check("Tilt", overhang_deg=45)["overhang_faces"], 0)
-        self.assertEqual(topology.print_check("Tilt", overhang_deg=20)["overhang_faces"], 0)
+        self.assertEqual(topology.print_check("Tilt", overhang_deg=70)["overhang_faces"], 0)
 
     def test_inverted_mesh_is_checked_as_solid(self):
         def build(bm):
