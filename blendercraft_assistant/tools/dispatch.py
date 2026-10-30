@@ -24,7 +24,14 @@ def call_tool(
         # Pushed even after a failure: the handler may have changed the scene
         # before raising, and the step keeps that change undoable.
         if tool.kind == "scene" and tool.push_undo:
-            push_step(args.get("description") or name)
-            if tracker is not None:
-                tracker.record_ai_step()
+            try:
+                push_step(args.get("description") or name)
+                if tracker is not None:
+                    tracker.record_ai_step()
+            except Exception:  # noqa: BLE001 - reported as an error result
+                result = ToolResult(
+                    text=f"{result.text}\n\nUndo step failed:\n{traceback.format_exc()}",
+                    images=result.images,
+                    is_error=True,
+                )
     return replace(result, text=truncate(result.text))

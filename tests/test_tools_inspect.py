@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest import mock
 
 import bpy
 
@@ -13,6 +14,7 @@ from blendercraft_assistant.tools.base import (
     tools_for_mode,
     truncate,
 )
+from blendercraft_assistant.tools import dispatch
 from blendercraft_assistant.tools.dispatch import call_tool
 from blendercraft_assistant.undo import ChangeTracker
 
@@ -129,6 +131,16 @@ class DispatchTest(RegistryTestCase):
         register_tool(_tool("t_scene3", "scene", push_undo=False))
         call_tool("t_scene3", {}, tracker)
         self.assertEqual(tracker._ai_steps, 0)
+
+    def test_undo_push_failure_is_error_and_keeps_handler_text(self):
+        register_tool(
+            _tool("t_scene5", "scene", lambda a: ToolResult(text="handler said hi"))
+        )
+        with mock.patch.object(dispatch, "push_step", side_effect=RuntimeError("no undo")):
+            res = call_tool("t_scene5", {}, ChangeTracker())
+        self.assertTrue(res.is_error)
+        self.assertIn("handler said hi", res.text)
+        self.assertIn("no undo", res.text)
 
     def test_scene_tool_without_tracker_works(self):
         register_tool(_tool("t_scene4", "scene"))
