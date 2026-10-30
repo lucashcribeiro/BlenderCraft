@@ -1,7 +1,7 @@
 """BlenderCraft application template.
 
 Enables the BlenderCraft Assistant extension, tunes the preferences and sets
-up every new, unsaved file: 1 BU = 1 mm, a 20 mm default cube and no
+up every new, unsaved file: 1 BU = 1 mm, a 20 mm default cube (camera and light moved with it) and no
 Animation workspace or timeline. Files that already have a name keep their
 own workspaces and units.
 
@@ -70,6 +70,29 @@ def _resize_default_cube() -> None:
     bpy.context.view_layer.update()
 
 
+# Where Blender's startup file puts them, in the original 1 BU = 1 m scene.
+FACTORY_LOCATIONS = {
+    "Camera": ("CAMERA", (7.358891, -6.925791, 4.958309)),
+    "Light": ("LIGHT", (4.076245, 1.005454, 5.903862)),
+}
+LOCATION_FACTOR = DEFAULT_CUBE_SIZE_MM / 2.0
+
+
+def _is_factory_object(obj, kind: str, location) -> bool:
+    if obj.type != kind or obj.parent is not None:
+        return False
+    return all(abs(a - b) <= 1e-3 for a, b in zip(obj.location, location))
+
+
+def _scale_default_camera_and_light() -> None:
+    """Move the untouched default camera and light out by the cube's factor,
+    so they stay around the cube once it is 20 mm."""
+    for name, (kind, location) in FACTORY_LOCATIONS.items():
+        obj = bpy.data.objects.get(name)
+        if obj is not None and _is_factory_object(obj, kind, location):
+            obj.location = [value * LOCATION_FACTOR for value in obj.location]
+
+
 def _remove_animation_workspace() -> None:
     animation = bpy.data.workspaces.get("Animation")
     if animation is None:
@@ -92,6 +115,7 @@ def setup_new_file(*_args) -> None:
     if scene is not None:
         apply_units(scene)
     _resize_default_cube()
+    _scale_default_camera_and_light()
     _remove_animation_workspace()
     # File > New reaches here too, and its Layout still has a timeline.
     _schedule_ui_tweaks()

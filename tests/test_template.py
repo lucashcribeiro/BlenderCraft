@@ -73,6 +73,44 @@ class SetupNewFileTest(unittest.TestCase):
         for got, want in zip(dims, (5, 6, 7)):
             self.assertAlmostEqual(got, want, places=4)
 
+    def test_default_camera_and_light_move_out_with_the_cube(self):
+        camera, light = bpy.data.objects["Camera"], bpy.data.objects["Light"]
+        before = {o.name: tuple(o.location) for o in (camera, light)}
+        self.template.setup_new_file()
+        for obj in (camera, light):
+            for got, was in zip(obj.location, before[obj.name]):
+                self.assertAlmostEqual(got, was * 10, places=3)
+            for value in obj.scale:
+                self.assertAlmostEqual(value, 1.0, places=6)
+
+    def test_camera_and_light_are_moved_only_once(self):
+        self.template.setup_new_file()
+        once = {n: tuple(bpy.data.objects[n].location) for n in ("Camera", "Light")}
+        self.template.setup_new_file()
+        for name, location in once.items():
+            for got, was in zip(bpy.data.objects[name].location, location):
+                self.assertAlmostEqual(got, was, places=4)
+
+    def test_edited_camera_and_light_are_left_alone(self):
+        camera, light = bpy.data.objects["Camera"], bpy.data.objects["Light"]
+        camera.location = (1, 2, 3)
+        light.location = (4.0, 1.0, 5.9)  # close to the factory spot, but moved
+        self.template.setup_new_file()
+        self.assertEqual(tuple(round(v, 4) for v in camera.location), (1.0, 2.0, 3.0))
+        self.assertEqual(tuple(round(v, 4) for v in light.location), (4.0, 1.0, 5.9))
+
+    def test_an_object_named_light_that_is_not_a_light_is_left_alone(self):
+        # An object called "Light" that is not a light (e.g. an empty) is not ours.
+        light = bpy.data.objects["Light"]
+        empty = bpy.data.objects.new("Light", None)
+        bpy.context.scene.collection.objects.link(empty)
+        empty.location = light.location
+        bpy.data.objects.remove(light)
+        empty.name = "Light"
+        location = tuple(empty.location)
+        self.template.setup_new_file()
+        self.assertEqual(tuple(empty.location), location)
+
     def test_missing_cube_is_fine(self):
         bpy.data.objects.remove(bpy.data.objects["Cube"])
         self.template.setup_new_file()
