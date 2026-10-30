@@ -1,8 +1,10 @@
 import json
+import math
 import unittest
 from unittest import mock
 
 import bpy
+from mathutils import Euler
 
 from blendercraft_assistant import tools, units
 from blendercraft_assistant.tools import base
@@ -207,6 +209,22 @@ class InspectTest(unittest.TestCase):
         for key in ("parent", "location", "rotation_deg", "scale", "materials",
                     "modifiers", "visible", "selected"):
             self.assertIn(key, obj)
+
+    def test_rotation_deg_in_quaternion_mode(self):
+        obj = _add_cube("Q", 20.0)
+        obj.rotation_mode = "QUATERNION"
+        obj.rotation_quaternion = Euler((0.0, 0.0, math.pi / 2)).to_quaternion()
+        data = json.loads(call_tool("inspect_object", {"name": "Q"}).text)
+        x, y, z = data["rotation_deg"]
+        self.assertAlmostEqual(x, 0.0, delta=0.01)
+        self.assertAlmostEqual(y, 0.0, delta=0.01)
+        self.assertAlmostEqual(z, 90.0, delta=0.01)
+
+    def test_rotation_deg_in_euler_mode(self):
+        obj = _add_cube("E", 20.0)
+        obj.rotation_euler = Euler((0.0, 0.0, math.radians(30)))
+        data = json.loads(call_tool("inspect_object", {"name": "E"}).text)
+        self.assertAlmostEqual(data["rotation_deg"][2], 30.0, delta=0.01)
 
     def test_inspect_scene_follows_display_unit(self):
         _add_cube("Caixa", 25.4)

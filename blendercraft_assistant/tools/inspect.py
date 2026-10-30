@@ -31,13 +31,22 @@ def _get_object(name: str):
     return obj
 
 
+def _rotation_deg(obj) -> list[float]:
+    # rotation_euler is stale in QUATERNION / AXIS_ANGLE mode.
+    if obj.rotation_mode in {"QUATERNION", "AXIS_ANGLE"}:
+        euler = obj.matrix_basis.to_euler()
+    else:
+        euler = obj.rotation_euler
+    return [round(math.degrees(a), 3) for a in euler]
+
+
 def _object_info(obj, scene) -> dict:
     return {
         "name": obj.name,
         "type": obj.type,
         "parent": obj.parent.name if obj.parent else None,
         "location": _fmt(obj.location, scene),
-        "rotation_deg": [round(math.degrees(a), 3) for a in obj.rotation_euler],
+        "rotation_deg": _rotation_deg(obj),
         "scale": [round(s, 6) for s in obj.scale],
         "dimensions": _fmt(obj.dimensions, scene),
         "materials": [
