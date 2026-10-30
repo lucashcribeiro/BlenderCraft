@@ -190,9 +190,12 @@ class ClaudeProcess:
             raise RuntimeError("claude process is not running")
         message = {"type": "user", "message": {"role": "user", "content": content}}
         data = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
-        with self._write_lock:
-            proc.stdin.write(data)
-            proc.stdin.flush()
+        try:
+            with self._write_lock:
+                proc.stdin.write(data)
+                proc.stdin.flush()
+        except (OSError, ValueError) as exc:  # broken pipe, closed file
+            raise RuntimeError("claude process is not running") from exc
 
     def close_stdin(self) -> None:
         """End of input: the CLI finishes the current turn and exits."""

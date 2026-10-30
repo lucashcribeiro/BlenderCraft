@@ -406,6 +406,36 @@ class ProcessTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             proc.send_user([{"type": "text", "text": "x"}])
 
+    def test_send_user_after_close_stdin_raises_runtime_error(self):
+        proc, lines, exits, done = self._run_fake("text_turn")
+        proc.start()
+        proc.close_stdin()
+        with self.assertRaises(RuntimeError):
+            proc.send_user([{"type": "text", "text": "x"}])
+        self.assertTrue(done.wait(10))
+        proc.stop()
+
+    def test_send_user_when_child_exits_before_the_write(self):
+        # Child dies without reading; the pipe breaks while the parent
+        # still believes it is alive (poll() has not noticed yet).
+        lines, done = [], threading.Event()
+        proc = ClaudeProcess(
+            [sys.executable, "-c", "import os; os._exit(3)"],
+            cwd=str(TESTS_DIR),
+            on_line=lines.append,
+            on_exit=lambda code: done.set(),
+        )
+        proc.start()
+        self.assertTrue(done.wait(10))
+        payload = [{"type": "text", "text": "x" * 200000}]  # exceeds the pipe buffer
+        with self.assertRaises(RuntimeError):
+            proc.send_user(payload)
+        # The same path with the liveness pre-check bypassed.
+        with mock.patch.object(proc._proc, "poll", return_value=None):
+            with self.assertRaises(RuntimeError):
+                proc.send_user(payload)
+        proc.stop()
+
     def test_stop_kills_a_process_that_ignores_sigterm(self):
         script = (
             "import signal, sys, time\n"
