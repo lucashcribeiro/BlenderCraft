@@ -324,5 +324,251 @@ class OperatorsTest(unittest.TestCase):
             self.assertEqual(bpy.ops.bc.copy_mcp_command(), {"CANCELLED"})
 
 
+ICONS = set(bpy.types.UILayout.bl_rna.functions["label"].parameters["icon"].enum_items.keys())
+
+
+class FakeOperatorProps:
+    def __init__(self, idname):
+        module, name = idname.split(".")
+        rna = getattr(getattr(bpy.ops, module), name).get_rna_type()
+        object.__setattr__(self, "_names", set(rna.properties.keys()))
+
+    def __setattr__(self, name, value):
+        if name not in self._names:
+            raise AttributeError(f"operator has no property {name!r}")
+        object.__setattr__(self, name, value)
+
+
+class FakeLayout:
+    """Records what a panel draws and checks icons, properties and operators."""
+
+    def __init__(self, log):
+        self.log = log
+        self.alert = False
+        self.enabled = True
+        self.active = True
+        self.scale_y = 1.0
+        self.use_property_split = False
+
+    def _icon(self, icon):
+        assert icon in ICONS, f"unknown icon {icon!r}"
+
+    def _child(self, *args, **kwargs):
+        return FakeLayout(self.log)
+
+    row = column = box = split = _child
+
+    def label(self, text="", icon="NONE", **kwargs):
+        self._icon(icon)
+        self.log.append(("label", text))
+
+    def separator(self, **kwargs):
+        pass
+
+    def prop(self, data, prop, text=None, icon="NONE", **kwargs):
+        self._icon(icon)
+        assert prop in data.bl_rna.properties, prop
+        self.log.append(("prop", prop))
+
+    def prop_search(self, data, prop, search_data, search_prop, **kwargs):
+        assert prop in data.bl_rna.properties, prop
+        self.log.append(("prop", prop))
+
+    def operator(self, idname, text="", icon="NONE", **kwargs):
+        self._icon(icon)
+        self.log.append(("operator", idname, text))
+        return FakeOperatorProps(idname)
+
+    def operator_menu_enum(self, idname, prop, text="", icon="NONE", **kwargs):
+        self._icon(icon)
+        props = FakeOperatorProps(idname)
+        assert prop in props._names, prop
+        self.log.append(("operator", idname, text))
+
+    def popover(self, panel, text="", icon="NONE", **kwargs):
+        self._icon(icon)
+        assert hasattr(bpy.types, panel), panel
+        self.log.append(("popover", panel))
+
+
+class PanelDrawTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        from blendercraft_assistant import runtime
+        from blendercraft_assistant.claude.session import AgentSession
+        from blendercraft_assistant.conversations import (
+            ConversationStore,
+            Message,
+            ToolCall,
+        )
+        from blendercraft_assistant.ui import operators, panel, prefs, props
+
+        self.runtime = runtime
+        self.panel = panel
+        self.operators = operators
+        for module in (props, prefs, operators, panel):
+            module.register()
+            self.addCleanup(module.unregister)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = ConversationStore(Path(tmp.name))
+        conv = store.new("", "")
+        conv.messages = [
+            Message("user", "crie um cubo de 20 mm"),
+            Message(
+                "assistant",
+                "## Pronto\nCriei o **cubo** com [bevel](https://x).",
+                [
+                    ToolCall("tu1", "run_python", {"code": "x", "description": "cubo"}, "ok", "ok"),
+                    ToolCall("tu2", "screenshot", {"view": "iso"}, "", "running"),
+                    ToolCall("tu3", "measure", {}, "falhou", "error"),
+                ],
+            ),
+        ] * 5
+        self.session = AgentSession(conv, store, lambda *a: None, lambda n: "read")
+        for name, value in (
+            ("store", store),
+            ("session", self.session),
+            ("pending_approval", None),
+            ("claude_problem", ""),
+        ):
+            patcher = mock.patch.object(runtime, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.bc = bpy.context.window_manager.bc
+
+    def draw(self, panel_cls):
+        log = []
+        fake = mock.Mock(layout=FakeLayout(log))
+        context = mock.Mock(wraps=bpy.context)
+        context.window_manager = bpy.context.window_manager
+        context.scene = bpy.context.scene
+        context.preferences = bpy.context.preferences
+        context.region = mock.Mock(width=300)
+        context.active_object = bpy.context.active_object
+        panel_cls.draw(fake, context)
+        return log
+
+    def labels(self, log):
+        return [entry[1] for entry in log if entry[0] == "label"]
+
+    def operators_drawn(self, log):
+        return [entry[1] for entry in log if entry[0] == "operator"]
+
+    def test_category_is_translated_at_register(self):
+        self.assertEqual(
+            self.panel.VIEW3D_PT_bc_assistant.bl_category, i18n.t("assistant")
+        )
+        self.assertTrue(hasattr(bpy.types, "VIEW3D_PT_bc_assistant"))
+
+    def test_idle_panel_elements_in_order(self):
+        log = self.draw(self.panel.VIEW3D_PT_bc_assistant)
+        kinds = [(e[0], e[1]) for e in log]
+        order = [
+            ("label", i18n.t("idle")),
+            ("operator", "bc.new_chat"),
+            ("popover", "VIEW3D_PT_bc_conversations"),
+            ("prop", "model"),
+            ("label", i18n.t("you")),
+            ("prop", "input"),
+            ("prop", "attach_view"),
+            ("prop", "attach_selection"),
+            ("prop", "mode"),
+            ("label", i18n.t("changes", n=0)),
+            ("operator", "bc.undo_ai_changes"),
+            ("operator", "bc.set_unit"),
+        ]
+        positions = [kinds.index(item) for item in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("bc.stop", self.operators_drawn(log))
+        self.assertNotIn("bc.send_now", self.operators_drawn(log))
+        # Older messages are hidden behind "show older".
+        self.assertIn("wm.context_set_int", self.operators_drawn(log))
+        labels = self.labels(log)
+        self.assertIn("Pronto", labels)
+        self.assertIn("Criei o cubo com bevel.", labels)
+        self.assertFalse(any("**" in label for label in labels))
+
+    def test_working_shows_stop_send_now_and_queue(self):
+        self.session.status = "WORKING"
+        self.session.queue = [("depois", [])]
+        log = self.draw(self.panel.VIEW3D_PT_bc_assistant)
+        ops = self.operators_drawn(log)
+        self.assertIn("bc.stop", ops)
+        self.assertIn("bc.send_now", ops)
+        self.assertIn(i18n.t("queued", n=1), self.labels(log))
+        self.assertIn(i18n.t("working"), self.labels(log))
+
+    def test_tool_details_expand(self):
+        collapsed = self.labels(self.draw(self.panel.VIEW3D_PT_bc_assistant))
+        self.bc.expanded_tool = "tu3"
+        expanded = self.labels(self.draw(self.panel.VIEW3D_PT_bc_assistant))
+        self.assertFalse(any("falhou" in label for label in collapsed))
+        self.assertTrue(any("falhou" in label for label in expanded))
+
+    def test_approval_block_on_top(self):
+        import threading
+
+        self.runtime.pending_approval = (
+            "run_python",
+            {"code": "bpy.ops.mesh.primitive_cube_add()", "description": "cubo"},
+            threading.Event(),
+            [],
+        )
+        log = self.draw(self.panel.VIEW3D_PT_bc_assistant)
+        self.assertEqual(log[0], ("label", i18n.t("approval_request", tool="run_python")))
+        self.assertEqual(self.operators_drawn(log)[:2], ["bc.approve", "bc.approve"])
+
+    def test_claude_warnings(self):
+        self.runtime.claude_problem = "missing"
+        labels = " ".join(self.labels(self.draw(self.panel.VIEW3D_PT_bc_assistant)))
+        self.assertIn(i18n.t("claude_missing"), labels)
+        self.runtime.claude_problem = "login"
+        labels = " ".join(self.labels(self.draw(self.panel.VIEW3D_PT_bc_assistant)))
+        self.assertIn(i18n.t("claude_login"), labels)
+
+    def test_error_shown(self):
+        self.session.status = "ERROR"
+        self.session.error = "Claude Code exited with code 1"
+        labels = self.labels(self.draw(self.panel.VIEW3D_PT_bc_assistant))
+        self.assertIn(i18n.t("error"), labels)
+        self.assertIn("Claude Code exited with code 1", labels)
+
+    def test_no_session(self):
+        self.runtime.session = None
+        log = self.draw(self.panel.VIEW3D_PT_bc_assistant)
+        self.assertIn(("label", i18n.t("idle")), log)
+
+    def test_conversations_popover(self):
+        self.runtime.store.save(self.session.conversation)
+        log = self.draw(self.panel.VIEW3D_PT_bc_conversations)
+        ops = [e for e in log if e[0] == "operator"]
+        self.assertEqual(
+            [e[1] for e in ops], ["bc.open_conversation", "bc.delete_conversation"]
+        )
+        self.assertEqual(ops[0][2], "crie um cubo de 20 mm")
+
+    def test_joint_subpanel(self):
+        from blendercraft_assistant.tools.joints import create_pivot
+
+        log = self.draw(self.panel.VIEW3D_PT_bc_joint)
+        self.assertEqual(self.operators_drawn(log), ["bc.joint_create"])
+        bpy.ops.mesh.primitive_cube_add(size=10)
+        cube = bpy.context.active_object
+        pivot = create_pivot(cube.name, (5.0, 0.0, 0.0), "Z")
+        self.addCleanup(bpy.data.objects.remove, bpy.data.objects[pivot], do_unlink=True)
+        self.addCleanup(bpy.data.objects.remove, cube, do_unlink=True)
+        self.bc.joint_pivot = pivot
+        with mock.patch.object(self.operators, "joint_result", "Gira livre"):
+            log = self.draw(self.panel.VIEW3D_PT_bc_joint)
+        self.assertEqual(
+            self.operators_drawn(log), ["bc.joint_create", "bc.joint_reset", "bc.joint_test"]
+        )
+        self.assertIn(("prop", "joint_angle"), log)
+        self.assertIn("Gira livre", self.labels(log))
+
+
 if __name__ == "__main__":
     unittest.main()
