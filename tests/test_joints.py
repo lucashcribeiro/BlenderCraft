@@ -146,6 +146,12 @@ class JointTestSweep(JointTestBase):
         self.assertEqual(result["free_max"], 45.0)
         self.assertEqual(result["collisions"], [])
 
+    def test_no_keyframes_after_joint_test(self):
+        self._obstacle((0, 6, 0))
+        joints.joint_test(self.pivot)
+        self.assertIsNone(bpy.data.objects[self.pivot].animation_data)
+        self.assertIsNone(self.bar.animation_data)
+
     def test_restores_angle(self):
         self._obstacle((0, 6, 0))
         joints.set_angle(self.pivot, 25.0)
