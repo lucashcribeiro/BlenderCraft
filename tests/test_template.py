@@ -491,6 +491,30 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn(str(fake), result.stdout)
         self.assertNotIn("Aviso", result.stderr)
 
+    def test_config_dir_with_spaces(self):
+        self.config = self.tmp / "My Blender Config" / "5.2 beta"
+        for args in ((), ("--dev",)):
+            result = self.run_install(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            template, extension = self.targets()
+            self.assertTrue((template / "__init__.py").is_file())
+            self.assertTrue((extension / "blender_manifest.toml").is_file())
+
+    def test_install_leaves_no_temporary_files(self):
+        for args in ((), ("--dev",), ()):
+            self.assertEqual(self.run_install(*args).returncode, 0)
+        template, extension = self.targets()
+        for path in (template, extension):
+            self.assertEqual([p.name for p in path.parent.iterdir()], [path.name])
+
+    def test_help_prints_only_the_header(self):
+        result = self.run_install("--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--dev", result.stdout)
+        self.assertIn("BLENDERCRAFT_BLENDER_APP", result.stdout)
+        self.assertNotIn("set -euo", result.stdout)
+        self.assertFalse(self.config.exists())
+
     def test_unknown_option_fails(self):
         result = self.run_install("--bogus")
         self.assertNotEqual(result.returncode, 0)

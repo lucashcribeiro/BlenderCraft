@@ -16,7 +16,7 @@ for arg in "$@"; do
   case "$arg" in
     --dev) MODE=dev ;;
     -h|--help)
-      sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -42,15 +42,21 @@ EXTENSION_DST="$CONFIG/extensions/user_default/blendercraft_assistant"
 
 install_dir() {
   local src="$1" dst="$2"
+  local tmp
+  tmp="$(dirname "$dst")/.$(basename "$dst").tmp.$$"
   mkdir -p "$(dirname "$dst")"
+  rm -rf -- "$tmp"
+  # Build the new install beside the old one, so a failure here leaves the old
+  # one in place.
+  if [ "$MODE" = dev ]; then
+    ln -s "$src" "$tmp"
+  else
+    cp -R "$src" "$tmp"
+    find "$tmp" -name __pycache__ -type d -prune -exec rm -rf {} +
+  fi
   # No trailing slash: for a symlink this removes only the link, never the repo.
   rm -rf -- "$dst"
-  if [ "$MODE" = dev ]; then
-    ln -s "$src" "$dst"
-  else
-    cp -R "$src" "$dst"
-    find "$dst" -name __pycache__ -type d -prune -exec rm -rf {} +
-  fi
+  mv "$tmp" "$dst"
 }
 
 install_dir "$TEMPLATE_SRC" "$TEMPLATE_DST"
