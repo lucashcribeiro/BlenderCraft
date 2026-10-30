@@ -33,6 +33,20 @@ class UnitsTest(unittest.TestCase):
             units.set_display_unit(self.scene, key)
             self.assertEqual(units.format_length(20, self.scene), text)
 
+    def test_display_scale_and_suffix(self):
+        units.apply_internal_mm(self.scene)
+        expected = {"MM": (1.0, "mm"), "CM": (0.1, "cm"), "M": (0.001, "m"),
+                    "IN": (1 / 25.4, "in"), "FT": (1 / 304.8, "ft")}
+        for key, (factor, suffix) in expected.items():
+            units.set_display_unit(self.scene, key)
+            got_factor, got_suffix = units.display_scale_and_suffix(self.scene)
+            self.assertAlmostEqual(got_factor, factor, places=9)
+            self.assertEqual(got_suffix, suffix)
+
+    def test_display_scale_none_system(self):
+        self.scene.unit_settings.system = "NONE"
+        self.assertEqual(units.display_scale_and_suffix(self.scene), (1.0, ""))
+
     def test_meters_scene(self):
         us = self.scene.unit_settings
         us.scale_length = 1.0

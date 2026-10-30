@@ -56,6 +56,25 @@ _UNIT_FORMAT: dict[str, tuple[float, str]] = {
 }
 
 
+def display_scale_and_suffix(scene) -> tuple[float, str]:
+    """Factor converting Blender units to the display unit, and its suffix.
+
+    ``value_bu * factor`` is the length in the display unit; square it for
+    areas and cube it for volumes. Without a unit system the factor is 1 and
+    the suffix is empty. Adaptive length units fall back to millimeters.
+    """
+    us = scene.unit_settings
+    if us.system == "NONE":
+        return 1.0, ""
+    fixed = _UNIT_FORMAT.get(us.length_unit)
+    # mm_per_bu rounds away the float32 noise of scale_length.
+    meters_per_bu = mm_per_bu(scene) / 1000.0
+    if fixed is None:
+        return meters_per_bu / 0.001, "mm"
+    factor, suffix = fixed
+    return meters_per_bu / factor, suffix
+
+
 def format_length(value_bu: float, scene) -> str:
     """Format a length in BU in the scene's display unit, precision 3.
 

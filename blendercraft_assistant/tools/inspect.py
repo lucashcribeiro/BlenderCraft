@@ -7,18 +7,8 @@ import bpy
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
-from ..units import format_length, get_display_unit, mm_per_bu
+from ..units import display_scale_and_suffix, format_length, get_display_unit
 from .base import Tool, json_result, register_tool
-
-# Millimeters per display unit, with the suffix used in areas and volumes.
-_UNIT_MM = {
-    "MM": (1.0, "mm"),
-    "CM": (10.0, "cm"),
-    "M": (1000.0, "m"),
-    "IN": (25.4, "in"),
-    "FT": (304.8, "ft"),
-}
-
 
 def _fmt(values, scene) -> list[str]:
     return [format_length(v, scene) for v in values]
@@ -135,6 +125,10 @@ def _min_gap(bm_a, bm_b) -> float:
     return best
 
 
+def _with_unit(value: float, suffix: str, power: str) -> str:
+    return f"{value:.3f} {suffix}{power}" if suffix else f"{value:.3f}"
+
+
 def _measure(args: dict):
     bpy.context.view_layer.update()
     scene = bpy.context.scene
@@ -147,13 +141,12 @@ def _measure(args: dict):
             area = sum(f.calc_area() for f in bm.faces)
         finally:
             bm.free()
-        scale = mm_per_bu(scene) / _UNIT_MM[get_display_unit(scene)][0]
-        suffix = _UNIT_MM[get_display_unit(scene)][1]
+        scale, suffix = display_scale_and_suffix(scene)
         return json_result(
             {
                 "dimensions": _fmt(a.dimensions, scene),
-                "volume": f"{volume * scale**3:.3f} {suffix}³",
-                "area": f"{area * scale**2:.3f} {suffix}²",
+                "volume": _with_unit(volume * scale**3, suffix, "³"),
+                "area": _with_unit(area * scale**2, suffix, "²"),
             }
         )
     b = _get_object(str(b_name))
