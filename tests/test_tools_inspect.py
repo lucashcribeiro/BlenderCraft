@@ -267,6 +267,14 @@ class InspectTest(unittest.TestCase):
         dist = float(data["distance_between_origins"].split()[0])
         self.assertAlmostEqual(dist, 25.0, delta=0.01)
 
+    def test_measure_gap_without_geometry_is_null(self):
+        _add_cube("A", 20.0)
+        empty = bpy.data.objects.new("Vazio", bpy.data.meshes.new("Vazio"))
+        bpy.context.scene.collection.objects.link(empty)
+        data = json.loads(call_tool("measure", {"a": "A", "b": "Vazio"}).text)
+        self.assertIsNone(data["min_gap"])
+        self.assertIn("note", data)
+
     def test_measure_overlap_gap_is_zero(self):
         _add_cube("A", 20.0, x_mm=0.0)
         _add_cube("B", 20.0, x_mm=10.0)

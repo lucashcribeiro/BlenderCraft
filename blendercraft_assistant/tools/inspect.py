@@ -106,7 +106,7 @@ def _bvh(bm) -> BVHTree:
     return BVHTree.FromBMesh(bm)
 
 
-def _min_gap(bm_a, bm_b) -> float:
+def _min_gap(bm_a, bm_b) -> float | None:
     """Smallest distance between two meshes, in BU (0 when they overlap).
 
     Takes the nearest point on the other mesh's BVH for every vertex of each
@@ -122,7 +122,7 @@ def _min_gap(bm_a, bm_b) -> float:
             hit = tree.find_nearest(v.co)
             if hit and hit[3] is not None:
                 best = min(best, hit[3])
-    return best
+    return None if best == math.inf else best
 
 
 def _with_unit(value: float, suffix: str, power: str) -> str:
@@ -157,12 +157,13 @@ def _measure(args: dict):
         bm_a.free()
         bm_b.free()
     distance = (a.matrix_world.translation - b.matrix_world.translation).length
-    return json_result(
-        {
-            "distance_between_origins": format_length(distance, scene),
-            "min_gap": format_length(gap, scene),
-        }
-    )
+    result = {
+        "distance_between_origins": format_length(distance, scene),
+        "min_gap": None if gap is None else format_length(gap, scene),
+    }
+    if gap is None:
+        result["note"] = "min_gap unavailable: a mesh has no geometry"
+    return json_result(result)
 
 
 register_tool(
