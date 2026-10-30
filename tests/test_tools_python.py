@@ -10,6 +10,7 @@ import bpy
 from blendercraft_assistant import tools
 from blendercraft_assistant.tools.base import REGISTRY, Tool, register_tool
 from blendercraft_assistant.tools.dispatch import call_tool
+from blendercraft_assistant.undo import ChangeTracker
 
 tools.load_all()
 
@@ -187,6 +188,66 @@ class RunPythonTest(unittest.TestCase):
         res = call_tool("undo", {"steps": too_many})
         self.assertTrue(res.is_error)
         self.assertIn("undo", res.text.lower())
+
+
+class AiUndoTrackingTest(unittest.TestCase):
+    """The AI's undo/redo keep the tracker's AI step count in sync."""
+
+    def setUp(self):
+        _clear_scene()
+        bpy.ops.ed.undo_push(message="baseline")
+        self.tracker = ChangeTracker()
+
+    def _ai_cube(self, name):
+        code = f"bpy.ops.mesh.primitive_cube_add()\nbpy.context.active_object.name = '{name}'"
+        res = call_tool("run_python", {"code": code, "description": name}, self.tracker)
+        self.assertFalse(res.is_error, res.text)
+
+    def test_undo_last_turn_keeps_user_work_after_ai_undo(self):
+        bpy.ops.mesh.primitive_cube_add()
+        bpy.context.active_object.name = "UserWork"
+        bpy.ops.ed.undo_push(message="user work")
+        self.tracker.begin_turn()
+        for name in ("A", "B", "C"):
+            self._ai_cube(name)
+        res = call_tool("undo", {"steps": 1}, self.tracker)
+        self.assertFalse(res.is_error, res.text)
+        self._ai_cube("D")
+        self.assertEqual(self.tracker.ai_steps, 3)
+        self.tracker.undo_last_turn()
+        self.assertEqual(sorted(o.name for o in bpy.data.objects), ["UserWork"])
+
+    def test_redo_counts_as_ai_step_again(self):
+        self.tracker.begin_turn()
+        self._ai_cube("A")
+        call_tool("undo", {}, self.tracker)
+        self.assertEqual(self.tracker.ai_steps, 0)
+        res = call_tool("redo", {}, self.tracker)
+        self.assertFalse(res.is_error, res.text)
+        self.assertEqual(self.tracker.ai_steps, 1)
+
+    def test_ai_undo_beyond_its_steps_is_refused(self):
+        bpy.ops.mesh.primitive_cube_add()
+        bpy.context.active_object.name = "UserWork"
+        bpy.ops.ed.undo_push(message="user work")
+        self.tracker.begin_turn()
+        self._ai_cube("A")
+        res = call_tool("undo", {"steps": 2}, self.tracker)
+        self.assertTrue(res.is_error)
+        self.assertIn("1", res.text)
+        self.assertIn("this request", res.text)
+        # Nothing was undone and the count is unchanged.
+        self.assertEqual(sorted(o.name for o in bpy.data.objects), ["A", "UserWork"])
+        self.assertEqual(self.tracker.ai_steps, 1)
+
+    def test_ai_undo_without_ai_steps_is_refused(self):
+        bpy.ops.mesh.primitive_cube_add()
+        bpy.ops.ed.undo_push(message="user work")
+        self.tracker.begin_turn()
+        res = call_tool("undo", {}, self.tracker)
+        self.assertTrue(res.is_error)
+        self.assertEqual(len(bpy.data.objects), 1)
+        self.assertEqual(self.tracker.ai_steps, 0)
 
 
 @contextlib.contextmanager

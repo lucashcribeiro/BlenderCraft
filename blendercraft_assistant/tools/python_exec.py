@@ -104,7 +104,7 @@ def _steps(args: dict) -> int:
     return steps
 
 
-def _repeat(op, label: str, steps: int) -> ToolResult:
+def _repeat(op, label: str, steps: int, sign: int) -> ToolResult:
     done = 0
     try:
         for _ in range(steps):
@@ -114,16 +114,17 @@ def _repeat(op, label: str, steps: int) -> ToolResult:
         return ToolResult(
             text=f"Nothing more to {label} after {done} of {steps} steps: {exc}",
             is_error=True,
+            undo_delta=sign * done,
         )
-    return ToolResult(text=f"{label} done: {done} step(s)")
+    return ToolResult(text=f"{label} done: {done} step(s)", undo_delta=sign * done)
 
 
 def _undo(args: dict) -> ToolResult:
-    return _repeat(bpy.ops.ed.undo, "undo", _steps(args))
+    return _repeat(bpy.ops.ed.undo, "undo", _steps(args), -1)
 
 
 def _redo(args: dict) -> ToolResult:
-    return _repeat(bpy.ops.ed.redo, "redo", _steps(args))
+    return _repeat(bpy.ops.ed.redo, "redo", _steps(args), 1)
 
 
 def _save(args: dict) -> ToolResult:
@@ -178,7 +179,11 @@ register_tool(
 register_tool(
     Tool(
         name="undo",
-        description="Undo the last steps (default 1) in the scene.",
+        description=(
+            "Undo the last steps (default 1) in the scene. Only the steps of "
+            "the current request can be undone; earlier changes are the "
+            "user's to undo."
+        ),
         input_schema=_STEPS_SCHEMA,
         handler=_undo,
         kind="scene",

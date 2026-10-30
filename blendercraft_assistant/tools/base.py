@@ -15,6 +15,8 @@ class ToolResult:
     text: str
     images: list[bytes] = field(default_factory=list)  # PNG
     is_error: bool = False
+    # Net move on the undo stack: -n after undoing n steps, +n after redoing.
+    undo_delta: int = 0
 
 
 @dataclass

@@ -15,6 +15,11 @@ def call_tool(
     if tool is None:
         return ToolResult(text=f"Unknown tool: {name}", is_error=True)
 
+    if tracker is not None and name == "undo":
+        refused = _check_undo_limit(args, tracker)
+        if refused is not None:
+            return refused
+
     scope = tracker.ai_scope() if tracker is not None else nullcontext()
     with scope:
         try:
@@ -36,4 +41,26 @@ def call_tool(
                     images=result.images,
                     is_error=True,
                 )
+        if tracker is not None and result.undo_delta:
+            tracker.shift_ai_steps(result.undo_delta)
     return replace(result, text=truncate(result.text))
+
+
+def _check_undo_limit(args: dict, tracker: ChangeTracker) -> ToolResult | None:
+    """The AI may only undo its own steps of the current request: past them
+    lie the user's work and earlier requests."""
+    try:
+        steps = int(args.get("steps", 1))
+    except (TypeError, ValueError):
+        return None  # the handler reports the bad argument
+    available = tracker.ai_steps
+    if steps <= available:
+        return None
+    return ToolResult(
+        text=(
+            f"Refused: undo can only revert the steps made in this request "
+            f"({available} available, {steps} requested). Earlier changes, "
+            "including the user's own work, must be undone by the user."
+        ),
+        is_error=True,
+    )

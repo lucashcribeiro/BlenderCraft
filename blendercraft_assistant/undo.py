@@ -30,6 +30,11 @@ class ChangeTracker:
     def record_ai_step(self) -> None:
         self._ai_steps += 1
 
+    def shift_ai_steps(self, delta: int) -> None:
+        """The AI moved on the undo stack: -n after undoing n steps, +n after
+        redoing. Never below zero."""
+        self._ai_steps = max(0, self._ai_steps + delta)
+
     @contextmanager
     def ai_scope(self):
         """Depsgraph updates inside this scope are not manual edits.
