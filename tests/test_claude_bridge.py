@@ -539,6 +539,53 @@ class ProcessTest(unittest.TestCase):
         self.assertFalse(proc.alive)
         self.assertTrue(done.wait(5))
 
+    def test_stop_also_ends_children_of_the_process(self):
+        script = (
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "print(child.pid, flush=True)\n"
+            "time.sleep(60)\n"
+        )
+        lines = []
+        proc = ClaudeProcess(
+            [sys.executable, "-c", script],
+            cwd=str(TESTS_DIR),
+            on_line=lines.append,
+            on_exit=lambda code, tail: None,
+        )
+        proc.start()
+        self.assertTrue(self._wait_lines(lines, 1))
+        grandchild = int(lines[0])
+        os.kill(grandchild, 0)  # alive
+        proc.stop()
+        gone = False
+        for _ in range(100):
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                gone = True
+                break
+            time.sleep(0.05)
+        if not gone:
+            os.kill(grandchild, 9)
+        self.assertTrue(gone, "grandchild survived stop()")
+
+    def test_reader_survives_a_broken_pipe_and_still_reports_exit(self):
+        class Broken:
+            def __iter__(self):
+                raise ValueError("I/O operation on closed file")
+
+        class FakeProc:
+            stdout = Broken()
+
+            def wait(self):
+                return 5
+
+        got = []
+        proc = ClaudeProcess(["x"], "/", lambda l: None, lambda c, t: got.append((c, t)))
+        proc._read_loop(FakeProc())
+        self.assertEqual(got, [(5, "")])
+
     def test_child_does_not_see_parent_session_variables(self):
         script = "import os; print(os.environ.get('CLAUDECODE', 'unset'), flush=True)"
         lines, done = [], threading.Event()

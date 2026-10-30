@@ -8,6 +8,7 @@ the system python3.
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -203,6 +204,7 @@ class ClaudeProcess:
             self._args,
             cwd=self._cwd,
             env=clean_env(),
+            start_new_session=True,  # own process group: stop() reaches children
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -242,6 +244,8 @@ class ClaudeProcess:
                         self._on_line(line)
                     except Exception:  # a bad callback must not kill the reader
                         pass
+        except (OSError, ValueError):  # pipe closed under us (stop())
+            pass
         finally:
             code = proc.wait()
             self._remove_config_file()
@@ -275,6 +279,20 @@ class ClaudeProcess:
             except OSError:
                 pass
 
+    @staticmethod
+    def _signal(proc: subprocess.Popen, sig: int) -> None:
+        """Signal the whole process group (the CLI may have children),
+        falling back to the pid alone."""
+        try:
+            os.killpg(proc.pid, sig)  # new session: pgid == pid
+            return
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.send_signal(sig)
+        except ProcessLookupError:
+            pass
+
     def _remove_config_file(self) -> None:
         path, self._config_file = self._config_file, None
         if path:
@@ -289,11 +307,11 @@ class ClaudeProcess:
             self._remove_config_file()
             return
         if proc.poll() is None:
-            proc.terminate()
+            self._signal(proc, signal.SIGTERM)
             try:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                self._signal(proc, signal.SIGKILL)
                 proc.wait()
         try:
             if proc.stdin is not None:
