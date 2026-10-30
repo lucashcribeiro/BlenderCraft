@@ -24,7 +24,7 @@ real geometry.
 ## Modifiers (add: `m = obj.modifiers.new("Name", 'TYPE')`)
 | Modifier | Does | Key settings |
 |---|---|---|
-| BEVEL | Rounds or chamfers edges | `width` (mm), `segments` (3-4 smooth, 1 chamfer), `limit_method='ANGLE'` (`angle_limit` 30 deg) to skip flat edges, `harden_normals` |
+| BEVEL | Rounds or chamfers edges | `width` (mm), `segments` (3-4 smooth, 1 chamfer), `limit_method='ANGLE'` with `angle_limit=math.radians(30)` (radians!) to skip flat edges, `harden_normals` |
 | BOOLEAN | Union / difference / intersect with another object | `operation`, `object`, `solver='EXACT'` (robust; FAST breaks on coplanar faces); hide the cutter (`cutter.hide_set(True)`) or `display_type='WIRE'` |
 | SOLIDIFY | Gives a surface thickness (shells, hollowing) | `thickness` (negative = inward), `offset` (-1 inside, 0 centred, 1 outside), `use_even_offset=True` |
 | MIRROR | Symmetry | `use_axis=(True,False,False)`, `use_clip=True` (keeps the seam closed), `use_mirror_merge=True`, `mirror_object` for an off-centre plane |
