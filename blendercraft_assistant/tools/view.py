@@ -103,10 +103,16 @@ def _ortho_scale_for(view: str, low: Vector, high: Vector) -> float:
     return _frame(view, low, high)[2]
 
 
-def _render_still() -> None:
-    result = bpy.ops.render.render(write_still=True)
+def _render_still(path: Path) -> None:
+    """Render the scene and save the result to path in the scene's image format.
+
+    Saving from the Render Result (instead of write_still) avoids Blender
+    logging a "Saved: ..." line for every screenshot.
+    """
+    result = bpy.ops.render.render()
     if "FINISHED" not in result:
         raise RuntimeError(f"Workbench render did not finish: {result}")
+    bpy.data.images["Render Result"].save_render(str(path))
 
 
 def _render_view(view: str, size: int) -> bytes:
@@ -123,12 +129,10 @@ def _render_view(view: str, size: int) -> bytes:
         "resolution_x": render.resolution_x,
         "resolution_y": render.resolution_y,
         "resolution_percentage": render.resolution_percentage,
-        "filepath": render.filepath,
         "file_format": render.image_settings.file_format,
         "color_mode": render.image_settings.color_mode,
         "film_transparent": render.film_transparent,
         "use_border": render.use_border,
-        "use_file_extension": render.use_file_extension,
         "light": shading.light,
     }
     # The eye icon hides an object in the viewport only; a render would still
@@ -159,15 +163,13 @@ def _render_view(view: str, size: int) -> bytes:
         render.resolution_percentage = 100
         render.film_transparent = False
         render.use_border = False
-        render.use_file_extension = False
         render.image_settings.file_format = "PNG"
         render.image_settings.color_mode = "RGB"
         path = Path(tmp_dir) / "shot.png"
-        render.filepath = str(path)
         context.view_layer.update()
 
         try:
-            _render_still()
+            _render_still(path)
         except RuntimeError:
             raise
         except Exception as exc:  # noqa: BLE001 - e.g. no GPU context in background
@@ -182,12 +184,10 @@ def _render_view(view: str, size: int) -> bytes:
             lambda: setattr(render, "resolution_x", saved["resolution_x"]),
             lambda: setattr(render, "resolution_y", saved["resolution_y"]),
             lambda: setattr(render, "resolution_percentage", saved["resolution_percentage"]),
-            lambda: setattr(render, "filepath", saved["filepath"]),
             lambda: setattr(render.image_settings, "file_format", saved["file_format"]),
             lambda: setattr(render.image_settings, "color_mode", saved["color_mode"]),
             lambda: setattr(render, "film_transparent", saved["film_transparent"]),
             lambda: setattr(render, "use_border", saved["use_border"]),
-            lambda: setattr(render, "use_file_extension", saved["use_file_extension"]),
             lambda: setattr(shading, "light", saved["light"]),
             lambda: [setattr(o, "hide_render", False) for o in hidden],
             lambda: bpy.data.objects.remove(cam_obj, do_unlink=True) if cam_obj else None,
