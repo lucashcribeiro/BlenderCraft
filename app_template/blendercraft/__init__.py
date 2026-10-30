@@ -102,8 +102,14 @@ def _remove_animation_workspace() -> None:
     for window in wm.windows if wm else ():
         if window.workspace == animation and layout is not None:
             window.workspace = layout
+    # The workspace's screens stay behind with no users once it is gone.
+    screens = [screen.name for screen in animation.screens]
     # bpy.data.workspaces has no remove(); batch_remove deletes any ID.
     bpy.data.batch_remove(ids=(animation,))
+    for name in screens:
+        screen = bpy.data.screens.get(name)
+        if screen is not None and screen.users == 0:
+            bpy.data.batch_remove(ids=(screen,))
 
 
 @persistent

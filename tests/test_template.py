@@ -49,9 +49,11 @@ class SetupNewFileTest(unittest.TestCase):
         self.assertEqual(scene.unit_settings.system, "METRIC")
         self.assertEqual(scene.unit_settings.length_unit, "MILLIMETERS")
         self.assertNotIn("Animation", bpy.data.workspaces)
+        self.assertNotIn("Animation", bpy.data.screens)
         # Other default workspaces stay.
         for name in ("Layout", "Modeling", "Sculpting", "Shading", "Scripting"):
             self.assertIn(name, bpy.data.workspaces)
+            self.assertIn(name, bpy.data.screens)
         cube = bpy.data.objects["Cube"]
         for value in cube.dimensions:
             self.assertAlmostEqual(value, 20.0, places=4)
