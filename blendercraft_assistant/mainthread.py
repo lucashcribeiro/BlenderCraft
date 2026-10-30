@@ -31,6 +31,11 @@ def run_on_main(fn: Callable[[], T], timeout: float = 120.0) -> T:
     Called from the main thread it runs directly. Otherwise it is queued and
     this call blocks until the main thread has run it. Exceptions raised by
     ``fn`` are re-raised here; ``TimeoutError`` is raised after ``timeout``.
+
+    A timeout does not guarantee that ``fn`` did not run: if it was already
+    executing when the timeout fired, it keeps running to completion and its
+    side effects land after this call has raised. The ``TimeoutError`` message
+    says so; callers should inspect the scene instead of assuming a no-op.
     """
     if _on_main_thread():
         return fn()
@@ -39,9 +44,17 @@ def run_on_main(fn: Callable[[], T], timeout: float = 120.0) -> T:
     try:
         return future.result(timeout=timeout)
     except FutureTimeoutError:
-        # Cancel so a late pump skips the work instead of running it unseen.
-        future.cancel()
-        raise TimeoutError(f"main thread did not run the call within {timeout}s") from None
+        # cancel() succeeds only if the main thread has not started fn yet;
+        # then a late pump() skips it instead of running it unseen.
+        if future.cancel():
+            raise TimeoutError(
+                f"main thread did not pick up the call within {timeout}s; "
+                "it was not run"
+            ) from None
+        raise TimeoutError(
+            f"main thread call did not finish within {timeout}s; the action may "
+            "still have been applied, inspect the scene before retrying"
+        ) from None
 
 
 def post(fn: Callable[[], None]) -> None:
@@ -70,7 +83,7 @@ def pump(max_items: int = 100) -> int:
             continue  # caller already timed out
         try:
             future.set_result(fn())
-        except BaseException as exc:  # noqa: BLE001 - handed to the waiting thread
+        except Exception as exc:  # noqa: BLE001 - handed to the waiting thread
             future.set_exception(exc)
     return ran
 
@@ -89,7 +102,15 @@ def install_timer() -> None:
 
 
 def uninstall_timer() -> None:
+    """Stop the timer and fail pending calls so workers do not wait for it."""
     import bpy
 
     if bpy.app.timers.is_registered(_tick):
         bpy.app.timers.unregister(_tick)
+    while True:
+        try:
+            _fn, future = _queue.get_nowait()
+        except queue.Empty:
+            break
+        if future is not None and future.set_running_or_notify_cancel():
+            future.set_exception(RuntimeError("main-thread queue stopped"))

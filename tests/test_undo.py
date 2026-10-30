@@ -62,7 +62,6 @@ class UndoTest(unittest.TestCase):
     def test_manual_edit_blocks(self):
         self.tracker.begin_turn()
         self._add_cube_as_ai()
-        bpy.context.view_layer.update()  # flush the AI add outside the scope
         self._move_and_evaluate(bpy.data.objects[0])
         self.assertFalse(self.tracker.can_undo_last_turn())
         with self.assertRaises(RuntimeError):
@@ -77,13 +76,58 @@ class UndoTest(unittest.TestCase):
             self.tracker.record_ai_step()
         self.assertTrue(self.tracker.can_undo_last_turn())
 
-    def test_direct_call_filters_update_kinds(self):
+    def test_scope_flushes_deferred_evaluation(self):
+        # Interactive Blender evaluates the depsgraph later: the scope must
+        # flush itself on exit instead of leaving updates for after it.
+        self.tracker.begin_turn()
+        with self.tracker.ai_scope():
+            bpy.ops.mesh.primitive_cube_add()
+            undo.push_step("cubo")
+            self.tracker.record_ai_step()
+            # Last thing in the scope, with no operator or update after it.
+            bpy.data.objects[0].location.x += 5.0
+        bpy.context.view_layer.update()  # a late evaluation must find nothing
+        self.assertTrue(self.tracker.can_undo_last_turn())
+
+    def test_selection_outside_scope_blocks(self):
+        self.tracker.begin_turn()
+        self._add_cube_as_ai()
+        bpy.context.view_layer.update()
+        self.assertTrue(self.tracker.can_undo_last_turn())
+        obj = bpy.data.objects[0]
+        obj.select_set(not obj.select_get())
+        bpy.context.view_layer.update()
+        self.assertFalse(self.tracker.can_undo_last_turn())
+        with self.assertRaises(RuntimeError):
+            self.tracker.undo_last_turn()
+
+    def test_undo_does_not_flag_its_own_updates(self):
+        self.tracker.begin_turn()
+        self._add_cube_as_ai()
+        self.tracker.undo_last_turn()
+        bpy.context.view_layer.update()
+        self.tracker.record_ai_step()
+        self.assertTrue(self.tracker.can_undo_last_turn())
+
+    def test_empty_update_is_not_manual(self):
         self.tracker.begin_turn()
         self.tracker.record_ai_step()
-        scene = bpy.context.scene
-        self.tracker.on_depsgraph_update(scene, _Depsgraph(_Update()))
+        self.tracker.on_depsgraph_update(bpy.context.scene, _Depsgraph())
         self.assertTrue(self.tracker.can_undo_last_turn())
-        self.tracker.on_depsgraph_update(scene, _Depsgraph(_Update(geometry=True)))
+
+    def test_any_update_outside_scope_is_manual(self):
+        # Even flag-less updates (selection, Scene-only) count.
+        self.tracker.begin_turn()
+        self.tracker.record_ai_step()
+        self.tracker.on_depsgraph_update(bpy.context.scene, _Depsgraph(_Update()))
+        self.assertFalse(self.tracker.can_undo_last_turn())
+
+    def test_direct_call_geometry_marks_manual(self):
+        self.tracker.begin_turn()
+        self.tracker.record_ai_step()
+        self.tracker.on_depsgraph_update(
+            bpy.context.scene, _Depsgraph(_Update(geometry=True))
+        )
         self.assertFalse(self.tracker.can_undo_last_turn())
 
     def test_direct_call_transform_marks_manual(self):

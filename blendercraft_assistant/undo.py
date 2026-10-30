@@ -1,5 +1,6 @@
 """Undo steps for AI changes and detection of manual edits."""
 
+import traceback
 from contextlib import contextmanager
 
 import bpy
@@ -31,20 +32,30 @@ class ChangeTracker:
 
     @contextmanager
     def ai_scope(self):
-        """Depsgraph updates inside this scope are not manual edits."""
+        """Depsgraph updates inside this scope are not manual edits.
+
+        Interactive Blender evaluates the depsgraph later, from the event
+        loop. Flush on exit, while the scope is still active, so the
+        handler sees the AI's own changes inside the scope.
+        """
         self._scope_depth += 1
         try:
             yield
         finally:
+            try:
+                bpy.context.view_layer.update()
+            except Exception:  # noqa: BLE001 - must not mask the scope's own error
+                traceback.print_exc()
             self._scope_depth -= 1
 
     def on_depsgraph_update(self, scene, depsgraph) -> None:
         if self._scope_depth > 0 or self._manual_edit:
             return
-        for update in depsgraph.updates:
-            if update.is_updated_geometry or update.is_updated_transform:
-                self._manual_edit = True
-                return
+        # Any update counts, selection and Scene-only ones included: they push
+        # undo steps too, and ed.undo would revert those instead of AI steps.
+        for _update in depsgraph.updates:
+            self._manual_edit = True
+            return
 
     def can_undo_last_turn(self) -> bool:
         return self._ai_steps > 0 and not self._manual_edit
@@ -53,7 +64,8 @@ class ChangeTracker:
         if not self.can_undo_last_turn():
             raise RuntimeError("Cannot undo the last turn")
         count = self._ai_steps
-        for _ in range(count):
-            bpy.ops.ed.undo()
+        with self.ai_scope():
+            for _ in range(count):
+                bpy.ops.ed.undo()
         self._ai_steps = 0
         return count

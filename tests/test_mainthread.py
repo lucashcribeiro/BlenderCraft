@@ -75,8 +75,58 @@ class MainThreadTest(unittest.TestCase):
         t.start()
         t.join(5)
         self.assertIsInstance(out.get("exc"), TimeoutError)
-        # Drain the stale item so it does not leak into other tests.
-        mainthread.pump()
+        self.assertIn("not run", str(out["exc"]))
+        # The cancelled item is skipped by a late pump.
+        self.assertEqual(mainthread.pump(), 1)
+
+    def test_timeout_while_running_still_applies(self):
+        effects = []
+        out = {}
+        release = threading.Event()
+
+        def slow():
+            release.wait(5)
+            effects.append("done")
+
+        def worker():
+            try:
+                mainthread.run_on_main(slow, timeout=0.3)
+            except Exception as exc:  # noqa: BLE001
+                out["exc"] = exc
+            finally:
+                release.set()
+
+        t = threading.Thread(target=worker)
+        t.start()
+        deadline = time.monotonic() + 2
+        while mainthread._queue.empty() and time.monotonic() < deadline:
+            time.sleep(0.001)
+        # Starts slow() on this thread; it finishes once the worker timed out.
+        self.assertEqual(mainthread.pump(), 1)
+        t.join(2)
+        self.assertEqual(effects, ["done"])
+        self.assertIsInstance(out.get("exc"), TimeoutError)
+        self.assertIn("may still have been applied", str(out["exc"]))
+
+    def test_uninstall_timer_fails_pending_calls(self):
+        out = {}
+
+        def worker():
+            try:
+                mainthread.run_on_main(lambda: 1, timeout=30)
+            except Exception as exc:  # noqa: BLE001
+                out["exc"] = exc
+
+        t = threading.Thread(target=worker)
+        t.start()
+        deadline = time.monotonic() + 2
+        while mainthread._queue.empty() and time.monotonic() < deadline:
+            time.sleep(0.001)
+        mainthread.uninstall_timer()
+        t.join(2)
+        self.assertFalse(t.is_alive())
+        self.assertIsInstance(out.get("exc"), RuntimeError)
+        self.assertIn("queue stopped", str(out["exc"]))
 
     def test_post_and_pump_count(self):
         seen = []
