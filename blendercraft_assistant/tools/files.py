@@ -13,6 +13,7 @@ from mathutils import Matrix
 
 from ..io_3mf import export_3mf, import_3mf
 from ..units import mm_per_bu
+from . import paths
 from .base import Tool, json_result, register_tool
 from .inspect import _get_object
 
@@ -24,7 +25,7 @@ def _path(args: dict) -> Path:
     raw = args.get("path")
     if not raw or not isinstance(raw, str):
         raise ValueError("'path' is required")
-    return Path(raw).expanduser()
+    return paths.resolve(raw)
 
 
 def _run_operator(op, **kwargs) -> None:
@@ -300,6 +301,7 @@ register_tool(
             "uses the unit declared in the file; glTF is in meters. Sizes "
             "are converted to the scene's units. The new objects are "
             "selected. Returns their names and dimensions in mm."
+            + paths.RULE
         ),
         input_schema={
             "type": "object",
@@ -322,6 +324,7 @@ register_tool(
             "in millimeters and glTF in meters (its specification), whatever "
             "the scene unit. Hidden objects are rejected. Selection and "
             "active object are restored."
+            + paths.RULE
         ),
         input_schema={
             "type": "object",

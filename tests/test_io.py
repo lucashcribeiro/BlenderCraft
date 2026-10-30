@@ -747,6 +747,57 @@ class SelectionRestoreTest(IoTestBase):
         self.assertIsNotNone(a)
 
 
+class RelativePathTest(IoTestBase):
+    """Relative paths go next to the open .blend, else to the default folder."""
+
+    def setUp(self):
+        super().setUp()
+        from blendercraft_assistant.tools import paths
+
+        self.paths = paths
+        self.default = self.dir / "Documents" / "BlenderCraft"
+        for name, value in (("DEFAULT_DIR", self.default),):
+            patcher = mock.patch.object(paths, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        _cube("Cube", 20.0)
+
+    def _blend(self, filepath):
+        patcher = mock.patch.object(self.paths, "_blend_filepath", return_value=filepath)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_export_unsaved_file_goes_to_default_folder(self):
+        self._blend("")
+        res = call_tool("export_file", {"path": "pecas/c.stl", "objects": ["Cube"]})
+        self.assertFalse(res.is_error, res.text)
+        target = self.default / "pecas" / "c.stl"
+        self.assertTrue(target.is_file())
+        self.assertEqual(json.loads(res.text)["path"], str(target))
+
+    def test_export_goes_next_to_the_open_blend(self):
+        self._blend(str(self.dir / "proj" / "modelo.blend"))
+        res = call_tool("export_file", {"path": "c.stl", "objects": ["Cube"]})
+        self.assertFalse(res.is_error, res.text)
+        target = self.dir / "proj" / "c.stl"
+        self.assertTrue(target.is_file())
+        self.assertEqual(json.loads(res.text)["path"], str(target))
+        self.assertFalse(self.default.exists())
+
+    def test_import_resolves_against_the_open_blend(self):
+        self.export("c.stl", objects=["Cube"])
+        self._blend(str(self.dir / "modelo.blend"))
+        res = call_tool("import_file", {"path": "c.stl"})
+        self.assertFalse(res.is_error, res.text)
+        self.assertEqual(json.loads(res.text)["path"], str(self.dir / "c.stl"))
+
+    def test_descriptions_state_the_rule(self):
+        from blendercraft_assistant.tools.base import REGISTRY
+
+        for name in ("import_file", "export_file", "save"):
+            self.assertIn("Documents/BlenderCraft", REGISTRY[name].description, name)
+
+
 class ToolRegistrationTest(unittest.TestCase):
     def test_kinds(self):
         from blendercraft_assistant.tools.base import REGISTRY

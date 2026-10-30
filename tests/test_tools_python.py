@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import bpy
 
@@ -294,6 +295,27 @@ class SaveTest(unittest.TestCase):
             res = _save({"path": str(Path(tmp) / "model")})
             self.assertFalse(res.is_error, res.text)
             self.assertTrue((Path(tmp) / "model.blend").exists())
+
+    def test_save_relative_path_of_unsaved_file_goes_to_default_folder(self):
+        from blendercraft_assistant.tools import paths
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(paths, "DEFAULT_DIR", Path(tmp) / "BlenderCraft"):
+            res = _save({"path": "model"})
+            target = Path(tmp) / "BlenderCraft" / "model.blend"
+            self.assertFalse(res.is_error, res.text)
+            self.assertTrue(target.exists())
+            self.assertIn(str(target), res.text)
+
+    def test_save_relative_path_goes_next_to_current_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "a").mkdir()
+            _save({"path": str(Path(tmp) / "a" / "first.blend")})
+            res = _save({"path": "second"})
+            target = Path(tmp) / "a" / "second.blend"
+            self.assertFalse(res.is_error, res.text)
+            self.assertTrue(target.exists())
+            self.assertIn(str(target), res.text)
 
     def test_save_without_path_uses_current_file(self):
         with tempfile.TemporaryDirectory() as tmp:

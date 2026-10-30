@@ -13,6 +13,7 @@ import bpy
 import mathutils
 from mathutils import Matrix, Vector
 
+from . import paths
 from .base import Tool, ToolResult, register_tool
 
 _FILENAME = "<run_python>"
@@ -137,9 +138,10 @@ def _save(args: dict) -> ToolResult:
             )
         bpy.ops.wm.save_mainfile()
         return ToolResult(text=f"Saved {bpy.data.filepath}")
-    path = os.path.abspath(os.path.expanduser(path))
+    path = str(paths.resolve(path))
     if not path.lower().endswith(".blend"):
         path += ".blend"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=path)
     return ToolResult(text=f"Saved {path}")
 
@@ -209,6 +211,7 @@ register_tool(
         description=(
             "Save the .blend file. Without path, saves to the current file; "
             "an unsaved file needs a path."
+            + paths.RULE
         ),
         input_schema={
             "type": "object",
