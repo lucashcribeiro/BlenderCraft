@@ -394,6 +394,20 @@ class Import3mfTest(IoTestBase):
         for dim in obj.dimensions:
             self.assertAlmostEqual(dim, 10.0, places=3)
 
+    def test_components_only_file_is_an_error_not_silent_success(self):
+        path = self.dir / "comp.3mf"
+        _write_model(
+            path,
+            "millimeter",
+            "<resources><object id='1' type='model'><components>"
+            "<component objectid='2'/></components></object></resources>"
+            "<build><item objectid='1'/></build>",
+        )
+        result = call_tool("import_file", {"path": str(path)})
+        self.assertTrue(result.is_error)
+        self.assertIn("mesh", result.text)
+        self.assertEqual(len(bpy.data.objects), 0)
+
     def test_unknown_unit_is_error(self):
         path = self.dir / "bad.3mf"
         _write_model(path, "furlong", f"<resources>{_UNIT_CUBE}</resources><build/>")

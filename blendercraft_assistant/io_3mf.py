@@ -281,6 +281,11 @@ def import_3mf(path: str, mm_per_bu: float) -> list:
         for item in _children(root, "item")
         if item.get("objectid") in meshes
     ]
+    if not meshes:
+        raise ValueError(
+            "No mesh objects found in the 3MF file (objects made only of "
+            "components are not supported)"
+        )
     placed = {oid for oid, _ in placements}
     placements += [(oid, None) for oid in meshes if oid not in placed]
 
