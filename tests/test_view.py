@@ -164,6 +164,18 @@ class ScreenshotToolTest(ViewTestBase):
         result = call_tool("screenshot", {"size": 0})
         self.assertTrue(result.is_error)
 
+    def test_size_above_cap_is_error(self):
+        _make_cube("Cube")
+        result = call_tool("screenshot", {"size": 4096})
+        self.assertTrue(result.is_error)
+        self.assertIn("2048", result.text)
+        self.assertEqual(result.images, [])
+
+    def test_max_size_renders(self):
+        _make_cube("Cube")
+        data = self.shoot("front", 2048)
+        self.assertEqual(_png_size(data), (2048, 2048))
+
     def test_empty_scene_error(self):
         result = call_tool("screenshot", {"view": "iso"})
         self.assertTrue(result.is_error)

@@ -25,7 +25,7 @@ _VIEW_DIRECTIONS = {
 
 _MARGIN = 0.10
 _MIN_SIZE = 16
-_MAX_SIZE = 4096
+_MAX_SIZE = 2048
 
 
 def _visible_mesh_bounds(context) -> tuple[Vector, Vector]:
@@ -269,7 +269,7 @@ register_tool(
             "view: front, back, left, right, top, bottom, iso (front-right-"
             "top). Fixed views are Workbench renders framing all visible "
             "mesh objects with a 10% margin, size x size pixels (default "
-            "768, 16-4096; ignored for 'viewport'). Use several angles to "
+            "768, 16-2048; ignored for 'viewport'). Use several angles to "
             "judge proportions, joins and orientation. Does not change the "
             "scene."
         ),
