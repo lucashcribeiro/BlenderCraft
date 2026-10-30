@@ -466,6 +466,25 @@ class OtherFormatsTest(IoTestBase):
         self.assertTrue(result.is_error)
         self.assertIn("Hidden", result.text)
 
+    def test_export_hidden_object_is_error_in_every_format(self):
+        for how in ("hide_set", "hide_viewport"):
+            for name in ("h.stl", "h.obj", "h.ply", "h.glb", "h.3mf"):
+                with self.subTest(how=how, name=name):
+                    _clear_scene()
+                    obj = _cube("Hidden", 20.0)
+                    obj.modifiers.new("Array", "ARRAY").count = 2
+                    if how == "hide_set":
+                        obj.hide_set(True)
+                    else:
+                        obj.hide_viewport = True
+                    result = call_tool(
+                        "export_file",
+                        {"path": str(self.dir / name), "objects": ["Hidden"]},
+                    )
+                    self.assertTrue(result.is_error)
+                    self.assertIn("Hidden", result.text)
+                    self.assertFalse((self.dir / name).exists())
+
     def test_export_unknown_object_is_error(self):
         result = call_tool(
             "export_file", {"path": str(self.dir / "c.stl"), "objects": ["Ghost"]}

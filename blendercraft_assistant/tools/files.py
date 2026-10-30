@@ -79,6 +79,10 @@ def _export_objects(args: dict) -> list:
     for o in objs:
         if in_layer.get(o.name) is not o:
             raise ValueError(f"Object is not in the current view layer: {o.name}")
+        # Hidden objects are skipped by the operator exporters and are not
+        # evaluated by the viewport depsgraph (wrong 3MF geometry).
+        if not o.visible_get():
+            raise ValueError(f"Object is hidden, unhide it to export: {o.name}")
     return objs
 
 
