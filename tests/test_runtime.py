@@ -357,7 +357,7 @@ class RuntimeSessionTest(RuntimeTestBase):
         self.assertTrue((self.tmp / "workspace").is_dir())
         (args,) = self.spawned_args()
         self.assertEqual(args[args.index("--plugin-dir") + 1], str(runtime.PLUGIN_DIR))
-        self.assertEqual(args[args.index("--allowedTools") + 1], "mcp__blendercraft")
+        self.assertEqual(args[args.index("--allowedTools") + 1], "Skill,mcp__blendercraft")
         self.assertNotIn("--model", args)
         self.assertNotIn("--resume", args)
 

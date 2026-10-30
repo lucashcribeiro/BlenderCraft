@@ -176,7 +176,7 @@ class BuildArgsTest(unittest.TestCase):
         for flag, value in [
             ("--input-format", "stream-json"),
             ("--output-format", "stream-json"),
-            ("--tools", ""),
+            ("--tools", "Skill"),
             # Empty: the user's own hooks, plugins and settings stay out.
             ("--setting-sources", ""),
             ("--append-system-prompt", "SYS"),
@@ -216,14 +216,14 @@ class BuildArgsTest(unittest.TestCase):
 
     def test_build_args_modes(self):
         auto = self._args("AUTO")
-        self.assertEqual(self._value(auto, "--allowedTools"), "mcp__blendercraft")
+        self.assertEqual(self._value(auto, "--allowedTools"), "Skill,mcp__blendercraft")
         for flag in ("--permission-prompts", "--permission-prompt-tool", "--disallowedTools"):
             self.assertNotIn(flag, auto)
 
         ask = self._args("ASK")
         self.assertEqual(
             self._value(ask, "--allowedTools"),
-            "mcp__blendercraft__a,mcp__blendercraft__b",
+            "Skill,mcp__blendercraft__a,mcp__blendercraft__b",
         )
         self.assertEqual(self._value(ask, "--permission-prompts"), "host")
         self.assertEqual(
@@ -235,7 +235,7 @@ class BuildArgsTest(unittest.TestCase):
         ro = self._args("READONLY")
         self.assertEqual(
             self._value(ro, "--allowedTools"),
-            "mcp__blendercraft__a,mcp__blendercraft__b",
+            "Skill,mcp__blendercraft__a,mcp__blendercraft__b",
         )
         self.assertEqual(
             self._value(ro, "--disallowedTools"),
@@ -255,9 +255,11 @@ class BuildArgsTest(unittest.TestCase):
         self.assertEqual(self._value(args, "--model"), "haiku")
         self.assertEqual(self._value(args, "--resume"), "sess-1")
 
-    def test_tools_flag_value_is_a_real_empty_argument(self):
-        args = self._args("AUTO")
-        self.assertEqual(args[args.index("--tools") + 1], "")
+    def test_only_the_skill_builtin_tool_is_enabled(self):
+        for mode in ("AUTO", "ASK", "READONLY"):
+            args = self._args(mode)
+            self.assertEqual(args[args.index("--tools") + 1], "Skill")
+            self.assertIn("Skill", self._value(args, "--allowedTools").split(","))
 
 
 class ConfigFileLifecycleTest(unittest.TestCase):

@@ -143,15 +143,17 @@ def build_args(
         "--verbose",
         "--mcp-config", _write_mcp_config(mcp_config),
         "--strict-mcp-config",
-        "--tools", "",
+        # Only Skill: the designer skills must be usable; every other built-in
+        # tool (Bash, Read, ...) stays off.
+        "--tools", "Skill",
         "--setting-sources", "",
         "--append-system-prompt", system_prompt,
         "--plugin-dir", plugin_dir,
     ]
-    reads = ",".join(TOOL_PREFIX + name for name in read_tools)
+    reads = ",".join(["Skill"] + [TOOL_PREFIX + name for name in read_tools])
     writes = ",".join(TOOL_PREFIX + name for name in write_tools)
     if mode == "AUTO":
-        args += ["--allowedTools", f"mcp__{MCP_SERVER_NAME}"]
+        args += ["--allowedTools", f"Skill,mcp__{MCP_SERVER_NAME}"]
     elif mode == "ASK":
         args += [
             "--allowedTools", reads,
