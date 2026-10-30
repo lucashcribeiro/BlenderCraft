@@ -143,8 +143,9 @@ class RunPythonTest(unittest.TestCase):
         self.assertEqual(len(bpy.data.objects), 2)
 
     def test_undo_with_nothing_to_undo_is_error(self):
-        # Land on the oldest step, then ask for one more.
-        res = call_tool("undo", {"steps": 500})
+        # Ask for more steps than the undo stack can hold.
+        too_many = bpy.context.preferences.edit.undo_steps + 10
+        res = call_tool("undo", {"steps": too_many})
         self.assertTrue(res.is_error)
         self.assertIn("undo", res.text.lower())
 
