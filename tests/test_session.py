@@ -391,6 +391,15 @@ class SessionStopTest(SessionTestBase):
         # tool 2 hit the limit and started the queued turn; tool 3 is stale
         self.assertEqual(self.conv.messages[3].tools, [])
 
+    def test_stop_clears_stale_error(self):
+        session = self.make()
+        session.send("x")
+        self.exit_process(session, self.procs[0], 3, "boom")
+        self.assertEqual(session.status, "ERROR")
+        session.stop()
+        self.assertEqual(session.status, "IDLE")
+        self.assertEqual(session.error, "")
+
     def test_close_stops_process(self):
         session = self.make()
         session.send("x")

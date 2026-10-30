@@ -111,6 +111,7 @@ class AgentSession:
         """User Stop: halt and drop the queued messages, which were written
         for the work that was just cancelled."""
         self.queue.clear()
+        self.error = ""
         self._halt()
 
     def _halt(self) -> None:
