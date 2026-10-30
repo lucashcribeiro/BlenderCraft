@@ -57,6 +57,8 @@ def create_pivot(part: str, point: tuple[float, float, float], axis: str) -> str
             f"{part} already has the pivot {obj.parent.name}; "
             "use joint_set_angle or joint_test on it"
         )
+    # Fail before creating anything, so no orphan pivot is left behind.
+    _moving_meshes(obj, include_self=True)
     bpy.context.view_layer.update()
     world = obj.matrix_world.copy()
 
@@ -113,10 +115,14 @@ def _restore_rotation(obj, saved: tuple) -> None:
     obj.rotation_axis_angle = axis_angle
 
 
-def _moving_meshes(pivot_obj) -> list:
-    meshes = [o for o in pivot_obj.children_recursive if o.type == "MESH"]
+def _moving_meshes(root, include_self: bool = False) -> list:
+    """Meshes that turn with ``root``: its descendants (and itself if asked)."""
+    candidates = list(root.children_recursive)
+    if include_self:
+        candidates.append(root)
+    meshes = [o for o in candidates if o.type == "MESH"]
     if not meshes:
-        raise ValueError(f"Pivot {pivot_obj.name} has no mesh part")
+        raise ValueError(f"{root.name} has no mesh to turn")
     return meshes
 
 
@@ -363,7 +369,8 @@ register_tool(
             "first collision with the against objects (default: every visible "
             "mesh except the part and its children). Returns free_min and "
             "free_max (last free angles), colliding_at_rest and the "
-            "collisions found. The pivot's angle is restored afterwards."
+            "collisions found. The pivot's angle is restored afterwards. A "
+            "smaller step avoids missing thin obstacles (at most 1440 steps)."
         ),
         input_schema={
             "type": "object",

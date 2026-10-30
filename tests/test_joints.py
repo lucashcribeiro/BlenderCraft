@@ -76,6 +76,19 @@ class CreatePivotTest(JointTestBase):
         pivot = bpy.data.objects["BC_Pivo_Bar"]
         self.assertEqual(tuple(pivot.matrix_world.translation), (3.0, 4.0, 5.0))
 
+    def test_rejects_part_without_meshes_and_leaves_no_pivot(self):
+        _clear_scene()
+        empty = bpy.data.objects.new("Hinge", None)
+        bpy.context.scene.collection.objects.link(empty)
+        with self.assertRaises(ValueError):
+            joints.create_pivot("Hinge", (0, 0, 0), "Z")
+        self.assertNotIn("BC_Pivo_Hinge", bpy.data.objects)
+        self.assertIsNone(empty.parent)
+        # An empty that groups a mesh is fine: the mesh moves with the pivot.
+        mesh = _box("Leaf", (2, 2, 2), (0, 0, 0))
+        mesh.parent = empty
+        self.assertEqual(joints.create_pivot("Hinge", (0, 0, 0), "Z"), "BC_Pivo_Hinge")
+
     def test_rejects_bad_axis_and_double_pivot(self):
         _clear_scene()
         _box("Bar", (10, 2, 2), (5, 0, 0))
