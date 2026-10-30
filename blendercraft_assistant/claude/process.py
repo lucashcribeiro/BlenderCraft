@@ -16,14 +16,28 @@ from pathlib import Path
 MCP_SERVER_NAME = "blendercraft"
 TOOL_PREFIX = f"mcp__{MCP_SERVER_NAME}__"
 
-# Variables that tie a child to the *parent* Claude Code session. A nested
-# `claude` refuses to start (or attaches to the wrong session) when they leak
-# in, which happens when Blender is launched from a Claude Code terminal.
-# Blender started from the Dock does not have them. Credentials and provider
-# selection are deliberately kept.
-_ENV_PREFIXES = ("CLAUDE_CODE_", "CLAUDE_AGENT_SDK", "CLAUDE_PREVIEW")
-_ENV_NAMES = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT")
-_ENV_KEEP = ("CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
+# Variables that bind a process to the *parent* Claude Code session (session
+# and host ids, messaging socket/token, entrypoint, SDK transport switches).
+# A nested `claude` must not inherit them, which happens when Blender is
+# launched from a Claude Code terminal; Blender started from the Dock does
+# not have them. Everything else passes through on purpose: credentials,
+# ANTHROPIC_*, CLAUDE_CONFIG_DIR and the other CLAUDE_CODE_* settings.
+_ENV_NAMES = frozenset(
+    {
+        "CLAUDECODE",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_SESSION_ATTENDED",
+        "CLAUDE_CODE_HOST_SESSION_ID",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_CODE_MESSAGING_TOKEN",
+        "CLAUDE_CODE_EXECPATH",
+        "CLAUDE_PID",
+        "CLAUDE_EFFORT",
+    }
+)
+_ENV_PREFIXES = ("CLAUDE_AGENT_SDK", "CLAUDE_PREVIEW")
 
 
 def clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
@@ -31,8 +45,7 @@ def clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
     source = os.environ if env is None else env
     out = {}
     for key, value in source.items():
-        stripped = key in _ENV_NAMES or key.startswith(_ENV_PREFIXES)
-        if stripped and key not in _ENV_KEEP:
+        if key in _ENV_NAMES or key.startswith(_ENV_PREFIXES):
             continue
         out[key] = value
     return out

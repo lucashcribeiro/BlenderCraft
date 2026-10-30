@@ -292,27 +292,35 @@ class FindClaudeTest(unittest.TestCase):
 
 class CleanEnvTest(unittest.TestCase):
     def test_strips_parent_session_variables_only(self):
-        env = {
+        stripped = {
             "CLAUDECODE": "1",
             "CLAUDE_CODE_ENTRYPOINT": "cli",
             "CLAUDE_CODE_SESSION_ID": "abc",
+            "CLAUDE_CODE_CHILD_SESSION": "1",
+            "CLAUDE_CODE_SESSION_ATTENDED": "1",
+            "CLAUDE_CODE_HOST_SESSION_ID": "h",
+            "CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/s.sock",
+            "CLAUDE_CODE_MESSAGING_TOKEN": "t",
+            "CLAUDE_CODE_EXECPATH": "/x/claude",
+            "CLAUDE_PID": "42",
+            "CLAUDE_EFFORT": "high",
             "CLAUDE_AGENT_SDK_VERSION": "1",
-            "CLAUDE_CODE_OAUTH_TOKEN": "keep-me",
-            "ANTHROPIC_API_KEY": "keep-me-too",
+            "CLAUDE_AGENT_SDK_MCP_NO_PREFIX": "1",
+            "CLAUDE_PREVIEW_CLASSIFIER_FLOOR": "1",
+        }
+        kept = {
+            "CLAUDE_CODE_OAUTH_TOKEN": "keep",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "CLAUDE_CODE_DISABLE_CRON": "1",
+            "CLAUDE_CONFIG_DIR": "/cfg",
+            "ANTHROPIC_API_KEY": "keep",
+            "ANTHROPIC_BASE_URL": "https://example.test",
             "PATH": "/usr/bin",
             "HOME": "/h",
         }
-        out = clean_env(env)
-        self.assertEqual(
-            out,
-            {
-                "CLAUDE_CODE_OAUTH_TOKEN": "keep-me",
-                "ANTHROPIC_API_KEY": "keep-me-too",
-                "PATH": "/usr/bin",
-                "HOME": "/h",
-            },
-        )
-        self.assertIn("CLAUDECODE", env)  # input untouched
+        env = {**stripped, **kept}
+        self.assertEqual(clean_env(env), kept)
+        self.assertEqual(len(env), len(stripped) + len(kept))  # input untouched
 
 
 class ProcessTest(unittest.TestCase):
