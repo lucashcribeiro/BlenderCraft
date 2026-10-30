@@ -149,14 +149,22 @@ def _export_file(args: dict):
     mm = mm_per_bu(scene)
     skipped = []
     if fmt == "3mf":
-        skipped = [o.name for o in objs if o.type != "MESH"]
-        objs = [o for o in objs if o.type == "MESH"]
-        if not objs:
+        skipped = [
+            {"name": o.name, "reason": "not a mesh"} for o in objs if o.type != "MESH"
+        ]
+        meshes = [o for o in objs if o.type == "MESH"]
+        if not meshes:
             raise ValueError("3MF export needs at least one mesh object")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if fmt == "3mf":
-        export_3mf(str(path), objs, mm)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        written = export_3mf(str(path), meshes, mm)
+        skipped += [
+            {"name": o.name, "reason": "no faces"}
+            for o in meshes
+            if o.name not in written
+        ]
+        objs = [o for o in meshes if o.name in written]
     else:
+        path.parent.mkdir(parents=True, exist_ok=True)
         _export_with_operator(fmt, path, objs, mm)
     if not path.is_file():
         raise RuntimeError(f"Export produced no file: {path}")
@@ -165,11 +173,10 @@ def _export_file(args: dict):
         "format": fmt,
         "objects": [o.name for o in objs],
         "size_bytes": path.stat().st_size,
+        "skipped": skipped,
     }
     if fmt not in ("glb", "gltf"):
         data["unit"] = "millimeter"
-    if skipped:
-        data["skipped_non_mesh"] = skipped
     return json_result(data)
 
 

@@ -112,12 +112,13 @@ def _xml_bytes(root: ET.Element) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
-def export_3mf(path: str, objects: list, mm_per_bu: float) -> None:
+def export_3mf(path: str, objects: list, mm_per_bu: float) -> list[str]:
     """Write mesh objects to a 3MF file in millimeters.
 
     Meshes are evaluated (modifiers applied), triangulated, placed in world
     space and scaled by ``mm_per_bu``. Each object gets one base material
     whose color comes from its first material (sRGB), or ``#CCCCCC``.
+    Objects without faces are skipped. Returns the names actually written.
     """
     model = ET.Element("model", {"xmlns": CORE_NS, "unit": "millimeter"})
     resources = ET.SubElement(model, "resources")
@@ -125,7 +126,7 @@ def export_3mf(path: str, objects: list, mm_per_bu: float) -> None:
     build = ET.SubElement(model, "build")
 
     bpy.context.view_layer.update()
-    written = 0
+    written_names: list[str] = []
     for obj in objects:
         verts, tris = _triangulated_world_mesh(obj, mm_per_bu)
         if not tris:
@@ -136,6 +137,7 @@ def export_3mf(path: str, objects: list, mm_per_bu: float) -> None:
             name=obj.name,
             displaycolor=_object_color(obj),
         )
+        written = len(written_names)
         object_id = str(written + 2)  # id 1 is the basematerials group
         obj_el = ET.SubElement(
             resources,
@@ -158,8 +160,8 @@ def export_3mf(path: str, objects: list, mm_per_bu: float) -> None:
                 tris_el, "triangle", v1=str(a), v2=str(b), v3=str(c)
             )
         ET.SubElement(build, "item", objectid=object_id)
-        written += 1
-    if written == 0:
+        written_names.append(obj.name)
+    if not written_names:
         raise ValueError("No mesh with faces to export")
 
     content_types = ET.Element("Types", {"xmlns": _CONTENT_TYPES_NS})
@@ -188,6 +190,7 @@ def export_3mf(path: str, objects: list, mm_per_bu: float) -> None:
         zf.writestr("[Content_Types].xml", _xml_bytes(content_types))
         zf.writestr("_rels/.rels", _xml_bytes(rels))
         zf.writestr(_MODEL_PATH, _xml_bytes(model))
+    return written_names
 
 
 def _local(tag: str) -> str:

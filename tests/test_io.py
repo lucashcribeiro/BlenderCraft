@@ -285,6 +285,39 @@ class Export3mfTest(IoTestBase):
             [0.0, 0.0, 1.0, 1.0],
         )
 
+    def test_3mf_result_lists_written_and_skipped_objects(self):
+        _cube("Solid", 20.0)
+        bpy.data.objects.new("Faceless", bpy.data.meshes.new("Faceless"))
+        bpy.context.scene.collection.objects.link(bpy.data.objects["Faceless"])
+        bpy.ops.object.empty_add()
+        empty = bpy.context.active_object
+        result = call_tool(
+            "export_file",
+            {
+                "path": str(self.dir / "w.3mf"),
+                "objects": ["Solid", "Faceless", empty.name],
+            },
+        )
+        self.assertFalse(result.is_error, result.text)
+        data = json.loads(result.text)
+        self.assertEqual(data["objects"], ["Solid"])
+        self.assertEqual(
+            sorted((e["name"], e["reason"]) for e in data["skipped"]),
+            sorted([("Faceless", "no faces"), (empty.name, "not a mesh")]),
+        )
+
+    def test_export_result_has_empty_skipped_list_when_all_written(self):
+        _cube("Solid", 20.0)
+        for name in ("a.3mf", "a.stl"):
+            data = json.loads(
+                call_tool(
+                    "export_file",
+                    {"path": str(self.dir / name), "objects": ["Solid"]},
+                ).text
+            )
+            self.assertEqual(data["objects"], ["Solid"])
+            self.assertEqual(data["skipped"], [])
+
     def test_3mf_no_mesh_objects_is_error(self):
         bpy.ops.object.empty_add()
         empty = bpy.context.active_object
