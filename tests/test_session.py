@@ -626,6 +626,42 @@ class SessionFailureTest(SessionTestBase):
         self.assertEqual(len(self.procs), 1)
         self.assertEqual(session.status, "ERROR")
 
+    def test_no_fallback_when_resumed_turn_already_ran_a_tool(self):
+        # A network/limit error after the agent acted: replaying the request
+        # in a fresh session would forget the history and repeat the tool.
+        self.conv.claude_session_id = "abc"
+        session = self.make()
+        session.send("oi")
+        session.handle_line(init_line("abc"))
+        session.handle_line(tool_started_line(1))
+        session.handle_line(result_line("API Error: overloaded", is_error=True))
+        self.assertEqual(len(self.procs), 1)
+        self.assertEqual(self.conv.claude_session_id, "abc")
+        self.assertEqual(self.conv.messages[1].text, "API Error: overloaded")
+        self.assertEqual(session.status, "IDLE")
+
+    def test_no_fallback_on_exit_when_resumed_turn_already_ran_a_tool(self):
+        self.conv.claude_session_id = "abc"
+        session = self.make()
+        session.send("oi")
+        session.handle_line(tool_started_line(1))
+        self.exit_process(session, self.procs[0], 1, "connection reset")
+        self.assertEqual(len(self.procs), 1)
+        self.assertEqual(self.conv.claude_session_id, "abc")
+        self.assertEqual(session.status, "ERROR")
+        self.assertIn("connection reset", session.error)
+        self.assertEqual(self.conv.messages[1].tools[0].status, "interrupted")
+
+    def test_no_fallback_when_resumed_turn_already_wrote_text(self):
+        self.conv.claude_session_id = "abc"
+        session = self.make()
+        session.send("oi")
+        session.handle_line(delta_line("Vou criar"))
+        session.handle_line(result_line("API Error: rate limited", is_error=True))
+        self.assertEqual(len(self.procs), 1)
+        self.assertEqual(self.conv.claude_session_id, "abc")
+        self.assertEqual(self.conv.messages[1].text, "Vou criar")
+
     def test_fallback_happens_only_once(self):
         self.conv.claude_session_id = "abc"
         session = self.make()

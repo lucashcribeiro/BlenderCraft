@@ -162,7 +162,7 @@ class AgentSession:
         self._process = None
         if self.status != WORKING:
             return
-        if self._resume_pending and code != 0:
+        if self._resume_pending and code != 0 and not self._turn_has_output():
             self._resume_fallback()
             return
         self._interrupt_tools()
@@ -230,9 +230,19 @@ class AgentSession:
             except Exception:
                 pass
 
+    def _turn_has_output(self) -> bool:
+        """The current turn already produced text or a tool call. A failure
+        after that is not a broken --resume (the session loaded) but e.g. a
+        network or usage-limit error: the fallback would drop Claude's
+        memory of the conversation and replay actions already taken."""
+        return self._assistant is not None and bool(
+            self._assistant.text or self._assistant.tools
+        )
+
     def _resume_fallback(self) -> None:
         """--resume failed (session gone): start fresh and replay the last
-        user message preceded by a summary of the previous conversation."""
+        user message preceded by a summary of the previous conversation.
+        Only used while the resumed turn has no output (_turn_has_output)."""
         conv = self.conversation
         conv.claude_session_id = None
         self._drop_process()
@@ -301,7 +311,7 @@ class AgentSession:
             self.changes += 1
 
     def _turn_finished(self, event: TurnFinished) -> None:
-        if event.is_error and self._resume_pending:
+        if event.is_error and self._resume_pending and not self._turn_has_output():
             self._resume_fallback()
             return
         self._resume_pending = False
