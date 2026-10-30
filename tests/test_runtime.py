@@ -12,7 +12,7 @@ from unittest import mock
 
 import bpy
 
-from blendercraft_assistant import mainthread, runtime
+from blendercraft_assistant import mainthread, runtime, units
 from blendercraft_assistant.conversations import ConversationStore
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -360,6 +360,24 @@ class RuntimeSessionTest(RuntimeTestBase):
         self.assertEqual(args[args.index("--allowedTools") + 1], "Skill,mcp__blendercraft")
         self.assertNotIn("--model", args)
         self.assertNotIn("--resume", args)
+
+    def test_spawn_passes_the_system_prompt(self):
+        claude = self.fake_claude(FIXTURES / "text_turn.jsonl")
+        with mock.patch.object(runtime, "find_claude", return_value=claude), \
+                mock.patch.object(
+                    runtime, "build_system_prompt", return_value="SENTINEL-PROMPT"
+                ) as build:
+            session = runtime.ensure_session()
+            session.send("oi")
+            self.assertTrue(pump_until(lambda: session.status == "IDLE"))
+        (args,) = self.spawned_args()
+        self.assertEqual(args[args.index("--append-system-prompt") + 1], "SENTINEL-PROMPT")
+        version, unit, language, limit = build.call_args.args
+        self.assertEqual(version, bpy.app.version_string)
+        self.assertEqual(unit, units.get_display_unit(bpy.context.scene).lower())
+        self.assertIn(language, ("pt", "en"))
+        self.assertEqual(limit, runtime.MAX_TOOL_CALLS)
+        self.assertEqual(session.max_tool_calls, runtime.MAX_TOOL_CALLS)
 
     def test_mode_and_model_change_restart_with_resume(self):
         claude = self.fake_claude(FIXTURES / "text_turn.jsonl")

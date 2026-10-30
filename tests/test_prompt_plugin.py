@@ -41,7 +41,16 @@ class PromptTests(unittest.TestCase):
         text = build_system_prompt("5.2.2", "mm", "en")
         for skill in SKILLS:
             self.assertIn(f"blendercraft:{skill}", text)
-        for phrase in ("ambiguous", "description", "what you could not"):
+        for phrase in (
+            "ambiguous",
+            "description",
+            "what you could not",
+            "Follow the user's instructions exactly",
+            "Inspect before you change",
+            "inspect_scene",
+            "Prefer non-destructive",
+            "list_operators",
+        ):
             self.assertIn(phrase, text)
 
     def test_tool_call_limit_is_a_parameter(self):
