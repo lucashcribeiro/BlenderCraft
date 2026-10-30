@@ -172,6 +172,9 @@ class BC_OT_delete_conversation(Operator):
 
     conv_id: StringProperty(options={"SKIP_SAVE", "HIDDEN"})
 
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
     def execute(self, context):
         try:
             runtime.delete_conversation(self.conv_id)

@@ -319,6 +319,20 @@ class OperatorsTest(unittest.TestCase):
             bpy.ops.bc.approve(allow=False)
         self.assertEqual([c.args for c in answer.call_args_list], [(True,), (False,)])
 
+    def test_conversation_operators(self):
+        with mock.patch.object(self.runtime, "open_conversation") as open_conv, \
+                mock.patch.object(self.runtime, "delete_conversation") as delete_conv:
+            self.assertEqual(bpy.ops.bc.open_conversation(conv_id="abc"), {"FINISHED"})
+            self.assertEqual(bpy.ops.bc.delete_conversation(conv_id="abc"), {"FINISHED"})
+            open_conv.side_effect = ValueError("invalid conversation id")
+            # An ERROR report surfaces as RuntimeError when called from Python.
+            with self.assertRaisesRegex(RuntimeError, "invalid conversation id"):
+                bpy.ops.bc.open_conversation(conv_id="../x")
+        open_conv.assert_called_with("../x")
+        delete_conv.assert_called_once_with("abc")
+        # Deleting from the panel asks first.
+        self.assertTrue(hasattr(self.operators.BC_OT_delete_conversation, "invoke"))
+
     def test_copy_mcp_command_needs_server(self):
         with mock.patch.object(self.runtime, "server", None):
             self.assertEqual(bpy.ops.bc.copy_mcp_command(), {"CANCELLED"})
