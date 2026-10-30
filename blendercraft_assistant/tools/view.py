@@ -2,6 +2,7 @@
 
 import shutil
 import tempfile
+import traceback
 from pathlib import Path
 
 import bpy
@@ -24,6 +25,7 @@ _VIEW_DIRECTIONS = {
 }
 
 _MARGIN = 0.10
+_DEFAULT_SIZE = 768
 _MIN_SIZE = 16
 _MAX_SIZE = 2048
 # Long edge of a viewport capture, so the image stays cheap for the model.
@@ -97,10 +99,6 @@ def _frame(view: str, low: Vector, high: Vector):
     clip_start = distance * 0.5
     clip_end = distance * 1.5 + depth
     return rotation, location, ortho_scale, clip_start, clip_end
-
-
-def _ortho_scale_for(view: str, low: Vector, high: Vector) -> float:
-    return _frame(view, low, high)[2]
 
 
 def _render_still(path: Path) -> None:
@@ -196,8 +194,8 @@ def _render_view(view: str, size: int) -> bytes:
         ):
             try:
                 step()
-            except Exception:  # noqa: BLE001, S110 - best-effort restore
-                pass
+            except Exception:  # noqa: BLE001 - best-effort restore
+                traceback.print_exc()
 
 
 def _largest_view3d_area():
@@ -273,7 +271,7 @@ def _viewport_screenshot() -> bytes | None:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def screenshot(view: str = "viewport", size: int = 768) -> bytes:
+def screenshot(view: str = "viewport", size: int = _DEFAULT_SIZE) -> bytes:
     """PNG bytes of the viewport or a fixed view. See _screenshot for the label."""
     return _screenshot(view, size)[1]
 
@@ -292,8 +290,14 @@ def _screenshot(view: str, size: int) -> tuple[str, bytes]:
 
 
 def _screenshot_tool(args: dict) -> ToolResult:
+    view = args.get("view")
+    size = args.get("size")
     try:
-        label, data = _screenshot(str(args.get("view", "viewport")), int(args.get("size", 768)))
+        try:
+            size = _DEFAULT_SIZE if size is None else int(size)
+        except (TypeError, ValueError):
+            raise ValueError(f"size must be an integer, got {size!r}") from None
+        label, data = _screenshot("viewport" if view is None else str(view), size)
     except ValueError as exc:
         return ToolResult(text=str(exc), is_error=True)
     return ToolResult(text=f"vista: {label}", images=[data])

@@ -54,6 +54,17 @@ def _pixels(png: bytes) -> list[float]:
             bpy.data.images.remove(image)
 
 
+def _content_box(pixels, size):
+    """(x0, y0, x1, y1) of the bright object pixels on the dark background."""
+    xs, ys = [], []
+    for y in range(size):
+        for x in range(size):
+            if pixels[(y * size + x) * 4] > 0.4:
+                xs.append(x)
+                ys.append(y)
+    return min(xs), min(ys), max(xs), max(ys)
+
+
 def _png_size(data: bytes) -> tuple[int, int]:
     # IHDR: 8-byte signature, 4-byte length, b"IHDR", width, height.
     return struct.unpack(">II", data[16:24])
@@ -208,13 +219,17 @@ class ScreenshotTest(ViewTestBase):
         low, high = view._visible_mesh_bounds(bpy.context)
         self.assertAlmostEqual(high.x, 10.0, places=3)
 
-    def test_ortho_scale_frames_bbox_with_margin(self):
+    def test_view_frames_bbox_with_margin(self):
+        size = 220
         _make_cube("Cube", size=20, scale=(2.0, 1.0, 1.0))  # 40 x 20 x 20
-        low, high = view._visible_mesh_bounds(bpy.context)
-        scale = view._ortho_scale_for("front", low, high)
-        self.assertAlmostEqual(scale, 40.0 * 1.1, places=3)
-        scale = view._ortho_scale_for("top", low, high)
-        self.assertAlmostEqual(scale, 40.0 * 1.1, places=3)
+        for name in ("front", "top"):
+            with self.subTest(view=name):
+                x0, y0, x1, y1 = _content_box(_pixels(self.shoot(name, size)), size)
+                # 40 mm across 220 px / 1.1 -> 200 px wide, 100 px tall, centered.
+                self.assertAlmostEqual(x1 - x0 + 1, 200, delta=2)
+                self.assertAlmostEqual(y1 - y0 + 1, 100, delta=2)
+                self.assertAlmostEqual(x0, (size - 200) / 2, delta=2)
+                self.assertAlmostEqual(y0, (size - 100) / 2, delta=2)
 
 
 class ViewportTest(ViewTestBase):
@@ -332,6 +347,23 @@ class ScreenshotToolTest(ViewTestBase):
         _make_cube("Cube")
         data = self.shoot("front", 2048)
         self.assertEqual(_png_size(data), (2048, 2048))
+
+    def test_none_arguments_use_defaults(self):
+        _make_cube("Cube")
+        view_ = view._screenshot
+        seen = []
+        view._screenshot = lambda name, size: seen.append((name, size)) or ("iso", b"x")
+        try:
+            result = call_tool("screenshot", {"view": None, "size": None})
+        finally:
+            view._screenshot = view_
+        self.assertFalse(result.is_error, result.text)
+        self.assertEqual(seen, [("viewport", 768)])
+
+    def test_non_integer_size_error(self):
+        result = call_tool("screenshot", {"size": "big"})
+        self.assertTrue(result.is_error)
+        self.assertIn("size", result.text)
 
     def test_empty_scene_error(self):
         result = call_tool("screenshot", {"view": "iso"})
