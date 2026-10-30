@@ -161,6 +161,29 @@ class JointTestSweep(JointTestBase):
             joints.joint_test(self.pivot, against=["Missing"])
         self.assertAlmostEqual(self._angle(), 25.0, places=3)
 
+    def test_failure_mid_sweep_restores_pose(self):
+        self._obstacle((0, 6, 0))
+        pivot = bpy.data.objects[self.pivot]
+        joints.set_angle(self.pivot, 25.0)
+        rotation = tuple(pivot.rotation_euler)
+        real = joints._posed_tree
+        calls = []
+
+        def flaky(local_bm, matrix):
+            calls.append(1)
+            if len(calls) == 6:
+                raise RuntimeError("boom")
+            return real(local_bm, matrix)
+
+        with mock.patch.object(joints, "_posed_tree", side_effect=flaky):
+            with self.assertRaises(RuntimeError):
+                joints.joint_test(self.pivot)
+        self.assertEqual(len(calls), 6)
+        # The sweep had moved the pivot away from 25 degrees before failing.
+        self.assertEqual(tuple(pivot.rotation_euler), rotation)
+        self.assertEqual(pivot.rotation_mode, "XYZ")
+        self.assertEqual(pivot["bc_angle"], 25.0)
+
     def test_rest_collision(self):
         # Overlaps the bar's top face near its far end.
         self._obstacle((7, 1.5, 0))
