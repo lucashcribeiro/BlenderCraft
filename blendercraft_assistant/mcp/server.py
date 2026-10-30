@@ -130,6 +130,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
 class McpServer:
     def __init__(self, handler: McpHandler, token: str, port: int = 0):
+        if not token:
+            raise ValueError("MCP server requires a non-empty token")
         self._handler = handler
         self._token = token
         self._port = port

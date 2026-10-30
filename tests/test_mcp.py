@@ -233,6 +233,10 @@ class ServerTest(unittest.TestCase):
         self.port = self.server.start()
         self.addCleanup(self.server.stop)
 
+    def test_empty_token_rejected(self):
+        with self.assertRaises(ValueError):
+            McpServer(_handler(), token="")
+
     def test_url(self):
         self.assertEqual(self.server.url, f"http://127.0.0.1:{self.port}/mcp")
 
