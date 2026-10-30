@@ -34,6 +34,9 @@ class _HttpServer(ThreadingHTTPServer):
 class _RequestHandler(BaseHTTPRequestHandler):
     server: _HttpServer
     server_version = "BlenderCraftMCP"
+    # Socket reads only: a stalled client must not pin a thread forever.
+    # It does not limit a handler blocked in approve.
+    timeout = 30
 
     def log_message(self, format, *args):  # keep stderr clean
         pass

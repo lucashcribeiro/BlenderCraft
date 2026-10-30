@@ -1,6 +1,8 @@
 import base64
 import json
+import socket
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 
@@ -9,6 +11,7 @@ from blendercraft_assistant.mcp.protocol import (
     PROTOCOL_VERSION,
     McpHandler,
 )
+from blendercraft_assistant.mcp import server as server_module
 from blendercraft_assistant.mcp.server import McpServer
 from blendercraft_assistant.tools.base import Tool, ToolResult
 
@@ -384,6 +387,16 @@ class ServerTest(unittest.TestCase):
         payload = json.loads(raw)
         self.assertEqual(payload["error"]["code"], -32603)
         self.assertEqual(payload["id"], 7)
+
+    def test_default_socket_timeout_is_set(self):
+        self.assertEqual(server_module._RequestHandler.timeout, 30)
+
+    def test_stalled_client_is_dropped(self):
+        with mock.patch.object(server_module._RequestHandler, "timeout", 0.2):
+            with socket.create_connection(("127.0.0.1", self.port), timeout=5) as c:
+                c.sendall(b"POST /mcp HTTP/1.1\r\nHost: x\r\n")  # never finishes
+                # The server closes the connection once its read times out.
+                self.assertEqual(c.recv(1024), b"")
 
     def test_stop_twice_is_safe(self):
         self.server.stop()
