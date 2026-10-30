@@ -26,6 +26,9 @@ _VIEW_DIRECTIONS = {
 _MARGIN = 0.10
 _MIN_SIZE = 16
 _MAX_SIZE = 2048
+# Long edge of a viewport capture, so the image stays cheap for the model.
+_VIEWPORT_MAX_EDGE = 1568
+_PNG_SIGNATURE = b"\x89PNG"
 
 
 def _visible_mesh_bounds(context) -> tuple[Vector, Vector]:
@@ -212,23 +215,60 @@ def _largest_view3d_area():
     return best
 
 
-def _viewport_screenshot() -> bytes | None:
-    """PNG of the largest 3D View, or None when there is no interface."""
-    if bpy.app.background:
-        return None
+def _has_ui() -> bool:
+    return not bpy.app.background
+
+
+def _run_screenshot_area(path: Path):
+    """Run the screenshot operator on the largest 3D View; returns its result set."""
     found = _largest_view3d_area()
     if found is None:
-        return None
+        return {"CANCELLED"}
     window, area, region = found
+    with bpy.context.temp_override(window=window, area=area, region=region):
+        return bpy.ops.screen.screenshot_area(filepath=str(path))
+
+
+def _fit_png(path: Path) -> bytes:
+    """PNG bytes of the image at path, long edge capped at _VIEWPORT_MAX_EDGE.
+
+    The operator follows the scene's image format, so the file is re-encoded
+    as PNG whenever it is not one already.
+    """
+    data = path.read_bytes()
+    image = bpy.data.images.load(str(path))
+    try:
+        width, height = image.size
+        longest = max(width, height)
+        if data.startswith(_PNG_SIGNATURE) and longest <= _VIEWPORT_MAX_EDGE:
+            return data
+        if longest > _VIEWPORT_MAX_EDGE:
+            factor = _VIEWPORT_MAX_EDGE / longest
+            image.scale(max(1, round(width * factor)), max(1, round(height * factor)))
+        out = path.with_name("fitted.png")
+        image.file_format = "PNG"
+        image.filepath_raw = str(out)
+        image.save()
+        return out.read_bytes()
+    finally:
+        bpy.data.images.remove(image)
+
+
+def _viewport_screenshot() -> bytes | None:
+    """PNG of the largest 3D View, or None when it cannot be captured."""
+    if not _has_ui():
+        return None
     tmp_dir = tempfile.mkdtemp(prefix="blendercraft-shot-")
     try:
         path = Path(tmp_dir) / "viewport.png"
         try:
-            with bpy.context.temp_override(window=window, area=area, region=region):
-                bpy.ops.screen.screenshot_area(filepath=str(path))
+            result = _run_screenshot_area(path)
         except RuntimeError:
-            return None  # operator unavailable in this context: render instead
-        return path.read_bytes()
+            return None  # operator unavailable in this context
+        if "FINISHED" not in result or not path.is_file():
+            return None
+        data = _fit_png(path)
+        return data if data.startswith(_PNG_SIGNATURE) else None
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -269,7 +309,7 @@ register_tool(
             "view: front, back, left, right, top, bottom, iso (front-right-"
             "top). Fixed views are Workbench renders framing all visible "
             "mesh objects with a 10% margin, size x size pixels (default "
-            "768, 16-2048; ignored for 'viewport'). Use several angles to "
+            "768, 16-2048; ignored for 'viewport', whose long edge is capped at 1568). Use several angles to "
             "judge proportions, joins and orientation. Does not change the "
             "scene."
         ),

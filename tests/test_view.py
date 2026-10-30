@@ -149,6 +149,95 @@ class ScreenshotTest(ViewTestBase):
         self.assertAlmostEqual(scale, 40.0 * 1.1, places=3)
 
 
+class ViewportTest(ViewTestBase):
+    """The viewport path needs a UI; its seams are patched to run in -b."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved = (view._has_ui, view._run_screenshot_area)
+        view._has_ui = lambda: True
+
+    def tearDown(self):
+        view._has_ui, view._run_screenshot_area = self._saved
+        super().tearDown()
+
+    def _fake_capture(self, pixels):
+        """Operator stand-in that 'captures' a real PNG of pixels x pixels."""
+        source = self.shoot("front", pixels)
+
+        def run(path):
+            path.write_bytes(source)
+            return {"FINISHED"}
+
+        view._run_screenshot_area = run
+
+    def test_small_capture_is_returned_unchanged(self):
+        _make_cube("Cube")
+        self._fake_capture(256)
+        label, data = view._screenshot("viewport", 768)
+        self.assertEqual(label, "viewport")
+        self.assertEqual(_png_size(data), (256, 256))
+
+    def test_large_capture_is_downscaled(self):
+        _make_cube("Cube")
+        self._fake_capture(2000)
+        label, data = view._screenshot("viewport", 768)
+        self.assertEqual(label, "viewport")
+        self.assertTrue(data.startswith(_PNG_MAGIC))
+        self.assertEqual(_png_size(data), (1568, 1568))
+        self.assertEqual(
+            [i.name for i in bpy.data.images if i.type == "IMAGE"], []
+        )
+
+    def test_non_png_capture_is_converted(self):
+        _make_cube("Cube")
+        scene = bpy.context.scene
+        before = scene.render.image_settings.file_format
+
+        def run(path):
+            image = bpy.data.images.new("tmp", 64, 64)
+            image.file_format = "JPEG"
+            image.filepath_raw = str(path)
+            image.save()
+            bpy.data.images.remove(image)
+            return {"FINISHED"}
+
+        view._run_screenshot_area = run
+        label, data = view._screenshot("viewport", 768)
+        self.assertEqual(label, "viewport")
+        self.assertTrue(data.startswith(_PNG_MAGIC))
+        self.assertEqual(scene.render.image_settings.file_format, before)
+
+    def test_cancelled_operator_falls_back_to_iso(self):
+        _make_cube("Cube")
+        view._run_screenshot_area = lambda path: {"CANCELLED"}
+        label, data = view._screenshot("viewport", 128)
+        self.assertEqual(label, "iso")
+        self.assertEqual(_png_size(data), (128, 128))
+
+    def test_missing_file_falls_back_to_iso(self):
+        _make_cube("Cube")
+        view._run_screenshot_area = lambda path: {"FINISHED"}
+        label, _data = view._screenshot("viewport", 128)
+        self.assertEqual(label, "iso")
+
+    def test_operator_error_falls_back_to_iso(self):
+        _make_cube("Cube")
+
+        def run(path):
+            raise RuntimeError("context is incorrect")
+
+        view._run_screenshot_area = run
+        label, _data = view._screenshot("viewport", 128)
+        self.assertEqual(label, "iso")
+
+    def test_tool_text_reports_fallback(self):
+        _make_cube("Cube")
+        view._run_screenshot_area = lambda path: {"CANCELLED"}
+        result = call_tool("screenshot", {"view": "viewport", "size": 128})
+        self.assertEqual(result.text, "vista: iso")
+
+
 class ScreenshotToolTest(ViewTestBase):
     def test_unknown_view_error(self):
         _make_cube("Cube")
