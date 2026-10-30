@@ -76,5 +76,6 @@ broken meshes.
 
 ## Export
 Use 3MF for multi-colour or multi-part, STL for single colour. One object per
-printable part, named clearly. Do not export helper objects (cutters, pivots,
+printable part, named clearly; for multi-colour 3MF, one object per colour (the
+export reads only the first material slot of each object). Do not export helper objects (cutters, pivots,
 empties, reference guides): hide or delete them first.

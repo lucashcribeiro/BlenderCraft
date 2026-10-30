@@ -56,11 +56,12 @@ for procedural or when modifiers genuinely cannot do it. Otherwise Array +
 Mirror + Boolean cover most printable parts.
 
 ## Materials and colour
-`mat = bpy.data.materials.new("Name"); mat.use_nodes = True`; set
+`mat = bpy.data.materials.new("Name")` (it already has a node tree); set
 `mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (r,g,b,1)`
 and mirror it to `mat.diffuse_color` so the Workbench screenshots show it.
-STL carries no colour; 3MF and glTF keep material colours. One material per
-colour of the final print.
+STL carries no colour; 3MF and glTF keep material colours. The 3MF export
+uses the first material slot of each object, so for a multi-colour print make
+one object per colour (one material each).
 
 ## Which route for which request
 - Hole / slot / pocket: Boolean DIFFERENCE with a cylinder or box cutter that
