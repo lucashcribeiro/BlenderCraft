@@ -1,3 +1,7 @@
+import contextlib
+import ctypes
+import os
+import sys
 import unittest
 from unittest import mock
 
@@ -191,8 +195,38 @@ class FakeSession:
         self.sent_now.append((text, list(attachments)))
 
 
+@contextlib.contextmanager
+def _quiet_reports():
+    """Silence operator reports ("Warning: ...") in test output only.
+
+    Blender writes them with C stdio, buffered when output is a pipe, so C
+    buffers are flushed while the descriptors still point at /dev/null.
+    """
+    libc = ctypes.CDLL(None)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    libc.fflush(None)  # earlier output still goes where it belongs
+    saved = [os.dup(1), os.dup(2)]
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        libc.fflush(None)
+        os.dup2(saved[0], 1)
+        os.dup2(saved[1], 2)
+        for fd in (*saved, devnull):
+            os.close(fd)
+
+
 class OperatorsTest(unittest.TestCase):
     def setUp(self):
+        quiet = _quiet_reports()
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
         from blendercraft_assistant import runtime
         from blendercraft_assistant.ui import operators, props
 
