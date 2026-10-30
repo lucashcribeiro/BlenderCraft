@@ -93,6 +93,17 @@ class RunPythonTest(unittest.TestCase):
         res = _run("def (:")
         self.assertTrue(res.is_error)
         self.assertIn("SyntaxError", res.text)
+        self.assertIn("<run_python>", res.text)
+        self.assertIn("def (:", res.text)
+        # Internal frames must not leak to the model.
+        self.assertNotIn("python_exec.py", res.text)
+        self.assertNotIn("ast.py", res.text)
+
+    def test_runtime_syntax_error_keeps_traceback_and_output(self):
+        res = _run("print('before')\ncompile('def (:', 'inner', 'exec')")
+        self.assertTrue(res.is_error)
+        self.assertIn("before", res.text)
+        self.assertIn("File \"<run_python>\", line 2", res.text)
 
     def test_creates_and_undo(self):
         res = call_tool(

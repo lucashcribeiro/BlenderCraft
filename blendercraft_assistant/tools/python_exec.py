@@ -63,6 +63,12 @@ def _run_python(args: dict) -> ToolResult:
     value_repr = None
     try:
         body, value = _split_last_expression(source)
+    except SyntaxError as exc:
+        # Only the location, offending line and caret: the traceback would
+        # show our own compile frames.
+        message = "".join(traceback.format_exception_only(type(exc), exc))
+        return ToolResult(text=message.rstrip(), is_error=True)
+    try:
         namespace = _namespace()
         with contextlib.redirect_stdout(out):
             exec(body, namespace)  # noqa: S102 - unrestricted by design (spec)
