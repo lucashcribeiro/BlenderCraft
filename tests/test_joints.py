@@ -129,6 +129,16 @@ class JointTestSweep(JointTestBase):
         self.assertEqual(hit["with"], "Obstacle")
         self.assertAlmostEqual(hit["angle"], result["free_max"] + 5.0)
 
+    def test_parked_in_a_colliding_pose(self):
+        # The rest check is about angle 0, not the pose the pivot is parked in.
+        self._obstacle((0, 6, 0))
+        joints.set_angle(self.pivot, 80.0)
+        result = joints.joint_test(self.pivot)
+        self.assertIs(result["colliding_at_rest"], False)
+        self.assertTrue(60 <= result["free_max"] <= 70, result)
+        self.assertAlmostEqual(self._angle(), 80.0, places=3)
+        self.assertEqual(bpy.data.objects[self.pivot]["bc_angle"], 80.0)
+
     def test_free_when_nothing_in_the_way(self):
         result = joints.joint_test(self.pivot, start=-90.0, end=45.0, step=10.0)
         self.assertEqual(result["free_min"], -90.0)

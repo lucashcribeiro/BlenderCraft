@@ -196,6 +196,8 @@ def joint_test(
             return None
 
         collisions: list[dict] = []
+        # The pivot may be parked at any pose: the rest check is about 0.
+        set_angle(pivot, 0.0)
         at_rest = collision_with()
         if at_rest is not None:
             return {
