@@ -212,7 +212,7 @@ class PrintCheckTest(TopologyTestBase):
         _make_object("Shelf", build)
         info = topology.print_check("Shelf")
         self.assertGreater(info["overhang_faces"], 0)
-        self.assertGreater(info["overhang_area_mm2"], 0)
+        self.assertAlmostEqual(info["overhang_area_mm2"], 400.0, delta=0.01)
 
     def test_overhang_angle_threshold(self):
         # overhang_deg is measured from vertical (slicer convention). A plate tilted
