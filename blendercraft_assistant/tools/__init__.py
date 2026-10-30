@@ -7,7 +7,7 @@ bpy. Call load_all() to register every tool.
 import importlib
 
 # Adding a tool module is a one-line change here.
-_MODULES = ("introspect", "inspect")
+_MODULES = ("introspect", "inspect", "python_exec")
 
 
 def load_all() -> None:
