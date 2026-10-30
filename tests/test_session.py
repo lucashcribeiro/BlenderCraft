@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from blendercraft_assistant.claude.session import AgentSession
@@ -708,6 +709,41 @@ class SessionFailureTest(SessionTestBase):
         self.assertEqual(session.status, "ERROR")
         self.assertIn("claude not found", session.error)
 
+
+
+class SessionNotesTest(SessionTestBase):
+    NOTES = {
+        "step_limit": "LIMITE",
+        "queue_dropped": "({n} DESCARTADAS)",
+        "exit_code": "SAIU COM {code}",
+        "send_failed": "SEM CONVERSA: {error}",
+        "save_failed": "SEM GRAVAR: {error}",
+    }
+
+    def test_note_keys(self):
+        from blendercraft_assistant.claude import session as session_module
+
+        self.assertEqual(set(session_module.NOTE_KEYS), set(self.NOTES))
+
+    def test_exit_error_uses_note(self):
+        session = self.make(notes=self.NOTES)
+        session.send("x")
+        self.exit_process(session, self.procs[0], 3, "boom")
+        self.assertEqual(session.error, "SAIU COM 3\nboom")
+
+    def test_send_error_uses_note(self):
+        def spawn(resume, on_line, on_exit):
+            raise OSError("claude not found")
+
+        session = AgentSession(self.conv, self.store, spawn, lambda n: "read", notes=self.NOTES)
+        session.send("x")
+        self.assertEqual(session.error, "SEM CONVERSA: claude not found")
+
+    def test_save_error_uses_note(self):
+        session = self.make(notes=self.NOTES)
+        with mock.patch.object(self.store, "save", side_effect=OSError("disco cheio")):
+            session.send("x")
+        self.assertEqual(session.error, "SEM GRAVAR: disco cheio")
 
 if __name__ == "__main__":
     unittest.main()

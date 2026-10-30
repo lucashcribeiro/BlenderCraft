@@ -397,6 +397,21 @@ class RuntimeSessionTest(RuntimeTestBase):
             self.assertTrue(pump_until(lambda: session.status != "WORKING"))
         self.assertEqual(runtime.claude_problem, "login")
 
+    def test_session_messages_follow_the_interface_language(self):
+        from blendercraft_assistant import i18n
+        from blendercraft_assistant.claude import session as session_module
+
+        with mock.patch.object(i18n, "_locale", return_value="pt_BR"), \
+                mock.patch.object(runtime, "find_claude", return_value=None):
+            session = runtime.ensure_session()
+            session.send("oi")
+        self.assertEqual(set(session._notes), set(session_module.NOTE_KEYS))
+        for key in session_module.NOTE_KEYS:
+            self.assertEqual(session._notes[key], i18n.STRINGS["pt"][key])
+        prefix = i18n.STRINGS["pt"]["send_failed"].split("{")[0]
+        self.assertTrue(session.error.startswith(prefix), session.error)
+        self.assertIn(i18n.STRINGS["pt"]["claude_missing"], session.error)
+
     def test_new_open_and_delete_conversation(self):
         claude = self.fake_claude(FIXTURES / "text_turn.jsonl")
         with mock.patch.object(runtime, "find_claude", return_value=claude):

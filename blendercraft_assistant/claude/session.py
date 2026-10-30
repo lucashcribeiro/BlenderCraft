@@ -33,10 +33,16 @@ ERROR = "ERROR"
 SUMMARY_HEADER = "Resumo da conversa anterior:"
 SUMMARY_MESSAGES = 10
 
+# User-visible texts; the runtime passes translated ones. Fields are
+# filled with str.format.
 _DEFAULT_NOTES = {
     "step_limit": "Stopped: tool call limit reached for this request.",
-    "queue_dropped": "({n} queued messages discarded)",  # str.format(n=...)
+    "queue_dropped": "({n} queued messages discarded)",
+    "exit_code": "Claude Code exited with code {code}",
+    "send_failed": "Could not talk to Claude Code: {error}",
+    "save_failed": "Could not save the conversation: {error}",
 }
+NOTE_KEYS = tuple(_DEFAULT_NOTES)
 
 
 class ProcessLike(Protocol):
@@ -157,7 +163,7 @@ class AgentSession:
             self._resume_fallback()
             return
         self._interrupt_tools()
-        self._fail(f"Claude Code exited with code {code}", stderr_tail.strip())
+        self._fail(self._notes["exit_code"].format(code=code), stderr_tail.strip())
 
     # ---- turns ------------------------------------------------------
 
@@ -193,7 +199,7 @@ class AgentSession:
                 last = exc
                 self._drop_process()
         self._interrupt_tools()
-        self._fail(f"Could not talk to Claude Code: {last}")
+        self._fail(self._notes["send_failed"].format(error=last))
         return False
 
     def _ensure_process(self) -> ProcessLike:
@@ -319,6 +325,6 @@ class AgentSession:
             self.store.save(self.conversation)
         except OSError as exc:  # a full disk must not break stop()/the queue
             log.warning("Could not save conversation %s: %s", self.conversation.id, exc)
-            note = f"Could not save the conversation: {exc}"
+            note = self._notes["save_failed"].format(error=exc)
             if note not in self.error:
                 self.error = f"{self.error}\n{note}".strip()

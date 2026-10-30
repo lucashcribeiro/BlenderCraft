@@ -21,7 +21,7 @@ from bpy.app.handlers import persistent
 
 from . import mainthread
 from .claude.process import TOOL_PREFIX, ClaudeProcess, build_args, find_claude
-from .claude.session import AgentSession
+from .claude.session import NOTE_KEYS, AgentSession
 from .conversations import ConversationStore
 from .i18n import t
 from .mcp.protocol import McpHandler
@@ -332,7 +332,7 @@ def _make_session(conversation) -> AgentSession:
         store,
         _spawn,
         _tool_kind,
-        notes={"step_limit": t("step_limit"), "queue_dropped": t("queue_dropped")},
+        notes={key: t(key) for key in NOTE_KEYS},  # templates, filled by the session
         on_turn_begin=_on_turn_begin,
     )
 
