@@ -1,5 +1,7 @@
 import struct
+import tempfile
 import unittest
+from pathlib import Path
 
 import bmesh
 import bpy
@@ -34,6 +36,24 @@ def _make_cube(name, size=20.0, location=(0.0, 0.0, 0.0), scale=(1.0, 1.0, 1.0))
     return obj
 
 
+def _paint(obj, color):
+    mat = bpy.data.materials.new(f"{obj.name}-mat")
+    mat.diffuse_color = color
+    obj.data.materials.append(mat)
+
+
+def _pixels(png: bytes) -> list[float]:
+    """Decoded RGBA pixels; PNG bytes also embed render metadata (e.g. time)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "shot.png"
+        path.write_bytes(png)
+        image = bpy.data.images.load(str(path))
+        try:
+            return list(image.pixels)
+        finally:
+            bpy.data.images.remove(image)
+
+
 def _png_size(data: bytes) -> tuple[int, int]:
     # IHDR: 8-byte signature, 4-byte length, b"IHDR", width, height.
     return struct.unpack(">II", data[16:24])
@@ -52,6 +72,7 @@ def _snapshot(scene):
         "use_border": r.use_border,
         "light": scene.display.shading.light,
         "objects": sorted(o.name for o in bpy.data.objects),
+        "hide_render": {o.name: o.hide_render for o in bpy.data.objects},
         "cameras": sorted(c.name for c in bpy.data.cameras),
     }
 
@@ -128,6 +149,53 @@ class ScreenshotTest(ViewTestBase):
         finally:
             view._render_still = real_render
         self.assertEqual(_snapshot(scene), before)
+
+    def test_restores_hide_render_on_render_failure(self):
+        _make_cube("Cube")
+        hidden = _make_cube("Hidden", location=(0.0, -30.0, 0.0))
+        hidden.hide_set(True)
+        scene = bpy.context.scene
+        before = _snapshot(scene)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        real_render = view._render_still
+        view._render_still = boom
+        try:
+            with self.assertRaises(RuntimeError):
+                view.screenshot("front", 128)
+        finally:
+            view._render_still = real_render
+        self.assertFalse(hidden.hide_render)
+        self.assertTrue(hidden.hide_get())
+        self.assertEqual(_snapshot(scene), before)
+
+    def test_eye_hidden_object_is_absent_from_render(self):
+        red = (1.0, 0.0, 0.0, 1.0)
+
+        def scene_with_blocker(hidden):
+            _clear_scene()
+            _make_cube("Cube", size=20)
+            blocker = _make_cube("Blocker", size=10, location=(0.0, -30.0, 0.0))
+            _paint(blocker, red)
+            if hidden:
+                blocker.hide_set(True)
+            return _pixels(view.screenshot("front", 128))
+
+        def scene_without_blocker():
+            _clear_scene()
+            _make_cube("Cube", size=20)
+            return _pixels(view.screenshot("front", 128))
+
+        try:
+            baseline = scene_without_blocker()
+        except RuntimeError as exc:
+            self.skipTest(f"Workbench render unavailable in background: {exc}")
+        # Control: a visible red blocker in front of the cube changes pixels.
+        self.assertNotEqual(scene_with_blocker(False), baseline)
+        # Hidden with the eye icon: the render must match the scene without it.
+        self.assertEqual(scene_with_blocker(True), baseline)
 
     def test_hidden_objects_are_not_rendered_or_framed(self):
         _make_cube("Cube", size=20)
