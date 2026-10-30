@@ -72,8 +72,10 @@ colour of the final print.
   walls at least 1.2 mm.
 - Symmetric part: model half, Mirror with clipping.
 - Repeated features: Array (or Array of Array for grids), not copy-paste.
-- Text / logos: `bpy.data.curves.new(type='FONT')`, `extrude`, convert to mesh
-  before boolean.
+- Text / logos: `c = bpy.data.curves.new("Label", type='FONT')`, set `c.body`,
+  `c.size`, `c.extrude` (mm), link `bpy.data.objects.new("Label", c)` to the
+  scene, make it active, then `bpy.ops.object.convert(target='MESH')` before any
+  boolean.
 - Imported or broken mesh: Weld, `recalc_face_normals`, then Remesh VOXEL as a
   last resort.
 - Joining pieces: Boolean UNION (EXACT) for one solid; keep separate objects
