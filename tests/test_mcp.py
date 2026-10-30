@@ -1,6 +1,7 @@
 import base64
 import json
 import socket
+import threading
 import unittest
 from unittest import mock
 import urllib.error
@@ -200,6 +201,53 @@ class ProtocolTest(unittest.TestCase):
         listed.append(_tool("shot"))
         self.assertFalse(h.handle(_rpc("tools/call", args))["result"]["isError"])
 
+    def test_approve_raising_denies(self):
+        def approve(name, inp):
+            raise RuntimeError("dialog crashed")
+
+        res = _handler(approve).handle(
+            _rpc(
+                "tools/call",
+                {"name": APPROVAL_TOOL, "arguments": {"tool_name": "t", "input": {}}},
+            )
+        )["result"]
+        self.assertFalse(res["isError"])
+        payload = json.loads(res["content"][0]["text"])
+        self.assertEqual(payload["behavior"], "deny")
+        self.assertIn("dialog crashed", payload["message"])
+
+    def test_approve_invalid_arguments(self):
+        calls = []
+        h = _handler(lambda n, i: calls.append(n) or (True, ""))
+        for arguments in (
+            {},
+            {"tool_name": "t"},
+            {"tool_name": 5, "input": {}},
+            {"tool_name": "t", "input": "x"},
+            {"tool_name": "t", "input": [1]},
+        ):
+            with self.subTest(arguments=arguments):
+                res = h.handle(
+                    _rpc(
+                        "tools/call",
+                        {"name": APPROVAL_TOOL, "arguments": arguments},
+                    )
+                )["result"]
+                self.assertTrue(res["isError"])
+        self.assertEqual(calls, [])
+
+    def test_non_dict_params(self):
+        for method in ("tools/list", "tools/call", "ping"):
+            with self.subTest(method=method):
+                out = _handler().handle(_rpc(method, [1, 2]))
+                self.assertEqual(out["error"]["code"], -32602)
+
+    def test_non_dict_arguments(self):
+        out = _handler().handle(
+            _rpc("tools/call", {"name": "echo", "arguments": [1]})
+        )
+        self.assertEqual(out["error"]["code"], -32602)
+
     def test_approve_not_available_without_callback(self):
         res = _handler().handle(
             _rpc(
@@ -333,6 +381,7 @@ class ServerTest(unittest.TestCase):
 
     def test_batch_invalid_request(self):
         status, _, body = _post(self.server, [_rpc("ping")])
+        self.assertEqual(status, 400)
         self.assertEqual(json.loads(body)["error"]["code"], -32600)
 
     def test_unknown_tool_is_error_result(self):
@@ -387,6 +436,93 @@ class ServerTest(unittest.TestCase):
         payload = json.loads(raw)
         self.assertEqual(payload["error"]["code"], -32603)
         self.assertEqual(payload["id"], 7)
+
+    def _raw_status(self, header_lines, token="TOKEN"):
+        head = [
+            "POST /mcp HTTP/1.1",
+            f"Host: 127.0.0.1:{self.port}",
+            f"Authorization: Bearer {token}",
+            *header_lines,
+            "",
+            "",
+        ]
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as c:
+            c.sendall("\r\n".join(head).encode())
+            return int(c.recv(1024).split(b" ", 2)[1])
+
+    def test_oversized_body_413(self):
+        self.assertEqual(self._raw_status(["Content-Length: 999999999999"]), 413)
+
+    def test_missing_content_length_is_parse_error(self):
+        self.assertEqual(self._raw_status([]), 400)
+
+    def test_invalid_content_length_400(self):
+        for value in ("abc", "-5"):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self._raw_status([f"Content-Length: {value}"]), 400
+                )
+
+    def test_non_bearer_scheme_401(self):
+        for auth in ("Basic TOKEN", "TOKEN", "Bearer", "Token TOKEN"):
+            with self.subTest(auth=auth):
+                status, _, _ = _post(
+                    self.server,
+                    _rpc("tools/list"),
+                    token=None,
+                    headers={"Authorization": auth},
+                )
+                self.assertEqual(status, 401)
+
+    def test_put_and_delete_405(self):
+        for method in ("PUT", "DELETE"):
+            with self.subTest(method=method):
+                req = urllib.request.Request(
+                    self.server.url,
+                    data=b"{}" if method == "PUT" else None,
+                    headers={"Authorization": "Bearer TOKEN"},
+                    method=method,
+                )
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    urllib.request.urlopen(req, timeout=5)
+                self.assertEqual(cm.exception.code, 405)
+                cm.exception.close()
+
+    def test_blocked_approve_does_not_block_other_requests(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def approve(name, inp):
+            entered.set()
+            release.wait(5)
+            return True, ""
+
+        server = McpServer(_handler(approve), token="TOKEN")
+        server.start()
+        self.addCleanup(server.stop)
+        self.addCleanup(release.set)
+        slow = {}
+
+        def slow_request():
+            slow["result"] = _post(
+                server,
+                _rpc(
+                    "tools/call",
+                    {
+                        "name": APPROVAL_TOOL,
+                        "arguments": {"tool_name": "t", "input": {}},
+                    },
+                ),
+            )
+
+        t = threading.Thread(target=slow_request)
+        t.start()
+        self.assertTrue(entered.wait(5))
+        status, _, _ = _post(server, _rpc("tools/list"))
+        self.assertEqual(status, 200)
+        self.assertTrue(t.is_alive())  # the approval is still pending
+        release.set()
+        t.join(5)
+        self.assertEqual(slow["result"][0], 200)
 
     def test_default_socket_timeout_is_set(self):
         self.assertEqual(server_module._RequestHandler.timeout, 30)
