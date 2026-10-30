@@ -26,6 +26,11 @@ MAX_CLOSES = 8
 VIEW_DISTANCE = 80.0
 _attempts = 0
 
+# Enabling the extension waits for bl_pkg and the extension repositories.
+ENABLE_INTERVAL = 0.25
+MAX_ENABLE_ATTEMPTS = 20
+_enable_attempts = 0
+
 
 def apply_units(scene) -> None:
     """1 BU = 1 mm shown in millimeters, through the extension when present."""
@@ -166,17 +171,46 @@ def _schedule_ui_tweaks() -> None:
         bpy.app.timers.register(_tweak_ui, first_interval=RETRY_INTERVAL, persistent=True)
 
 
-def _enable_extension() -> None:
+def _extension_enabled() -> bool:
+    return EXTENSION in bpy.context.preferences.addons
+
+
+def _enable_extension():
+    """Timer: enable the assistant extension, retrying until it is in the preferences.
+
+    register() runs before bl_pkg and the bl_ext repositories exist, so enabling
+    there silently fails (addon_utils.enable just returns None). A few ticks
+    later it works. Returns None when done."""
+    global _enable_attempts
     import addon_utils
 
+    if _extension_enabled():
+        return None
     try:
         addon_utils.enable(EXTENSION, default_set=True, persistent=True)
     except Exception as exc:  # the template must keep working without it
-        print(f"BlenderCraft: could not enable the assistant extension: {exc}")
+        print(f"BlenderCraft: error enabling the assistant extension: {exc}")
+    if _extension_enabled():
+        return None
+    _enable_attempts += 1
+    if _enable_attempts >= MAX_ENABLE_ATTEMPTS:
+        print(
+            f"BlenderCraft: could not enable the extension {EXTENSION}. "
+            "Is it installed? Run scripts/install.sh."
+        )
+        return None
+    return ENABLE_INTERVAL
+
+
+def _schedule_enable() -> None:
+    global _enable_attempts
+    _enable_attempts = 0
+    if not bpy.app.timers.is_registered(_enable_extension):
+        bpy.app.timers.register(_enable_extension, first_interval=ENABLE_INTERVAL, persistent=True)
 
 
 def register() -> None:
-    _enable_extension()
+    _schedule_enable()
     bpy.context.preferences.edit.undo_steps = UNDO_STEPS
     if setup_new_file not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(setup_new_file)
@@ -186,5 +220,6 @@ def register() -> None:
 def unregister() -> None:
     while setup_new_file in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(setup_new_file)
-    if bpy.app.timers.is_registered(_tweak_ui):
-        bpy.app.timers.unregister(_tweak_ui)
+    for timer in (_tweak_ui, _enable_extension):
+        if bpy.app.timers.is_registered(timer):
+            bpy.app.timers.unregister(timer)

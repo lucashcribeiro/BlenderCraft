@@ -132,25 +132,66 @@ class RegisterTest(unittest.TestCase):
     def test_register_unregister(self):
         with mock.patch("addon_utils.enable") as enable:
             self.template.register()
-        enable.assert_called_once()
-        args, kwargs = enable.call_args
-        self.assertEqual(args[0], "bl_ext.user_default.blendercraft_assistant")
-        self.assertTrue(kwargs.get("default_set"))
-        self.assertTrue(kwargs.get("persistent"))
+        # Enabling waits for the first tick: bl_ext does not exist yet at register().
+        enable.assert_not_called()
         self.assertEqual(bpy.context.preferences.edit.undo_steps, 256)
         self.assertIn(self.template.setup_new_file, bpy.app.handlers.load_post)
         self.assertTrue(bpy.app.timers.is_registered(self.template._tweak_ui))
+        self.assertTrue(bpy.app.timers.is_registered(self.template._enable_extension))
         self.template.unregister()
         self.assertNotIn(self.template.setup_new_file, bpy.app.handlers.load_post)
         self.assertFalse(bpy.app.timers.is_registered(self.template._tweak_ui))
+        self.assertFalse(bpy.app.timers.is_registered(self.template._enable_extension))
 
-    def test_register_survives_a_failing_extension_enable(self):
+    def test_enable_tick_enables_the_extension(self):
+        state = {"enabled": False}
+
+        def enable(*args, **kwargs):
+            state["enabled"] = True
+
+        self.template._enable_attempts = 0
+        with mock.patch("addon_utils.enable", side_effect=enable) as enable_mock, mock.patch.object(
+            self.template, "_extension_enabled", side_effect=lambda: state["enabled"]
+        ):
+            self.assertIsNone(self.template._enable_extension())
+        args, kwargs = enable_mock.call_args
+        self.assertEqual(args[0], "bl_ext.user_default.blendercraft_assistant")
+        self.assertTrue(kwargs.get("default_set"))
+        self.assertTrue(kwargs.get("persistent"))
+
+    def test_enable_tick_retries_while_the_extension_is_missing(self):
+        self.template._enable_attempts = 0
+        with mock.patch("addon_utils.enable") as enable_mock, mock.patch.object(
+            self.template, "_extension_enabled", return_value=False
+        ):
+            self.assertEqual(self.template._enable_extension(), self.template.ENABLE_INTERVAL)
+        enable_mock.assert_called_once()
+
+    def test_enable_tick_does_nothing_when_already_enabled(self):
+        with mock.patch("addon_utils.enable") as enable_mock, mock.patch.object(
+            self.template, "_extension_enabled", return_value=True
+        ):
+            self.assertIsNone(self.template._enable_extension())
+        enable_mock.assert_not_called()
+
+    def test_enable_tick_gives_up_with_a_clear_message(self):
+        self.template._enable_attempts = self.template.MAX_ENABLE_ATTEMPTS - 1
         out = io.StringIO()
-        with mock.patch("addon_utils.enable", side_effect=RuntimeError("boom")):
-            with contextlib.redirect_stdout(out):
-                self.template.register()
+        with mock.patch("addon_utils.enable"), mock.patch.object(
+            self.template, "_extension_enabled", return_value=False
+        ), contextlib.redirect_stdout(out):
+            self.assertIsNone(self.template._enable_extension())
+        self.assertIn("could not enable", out.getvalue())
+        self.assertIn("install.sh", out.getvalue())
+
+    def test_enable_tick_survives_a_failing_enable(self):
+        self.template._enable_attempts = 0
+        out = io.StringIO()
+        with mock.patch("addon_utils.enable", side_effect=RuntimeError("boom")), mock.patch.object(
+            self.template, "_extension_enabled", return_value=False
+        ), contextlib.redirect_stdout(out):
+            self.assertEqual(self.template._enable_extension(), self.template.ENABLE_INTERVAL)
         self.assertIn("boom", out.getvalue())
-        self.assertIn(self.template.setup_new_file, bpy.app.handlers.load_post)
 
     def test_register_twice_adds_one_handler(self):
         with mock.patch("addon_utils.enable"):
