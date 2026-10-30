@@ -86,11 +86,15 @@ def _is_factory_object(obj, kind: str, location) -> bool:
 
 def _scale_default_camera_and_light() -> None:
     """Move the untouched default camera and light out by the cube's factor,
-    so they stay around the cube once it is 20 mm."""
+    so they stay around the cube once it is 20 mm. The camera's clip range
+    grows by the same factor, or the cube would fall beyond clip_end."""
     for name, (kind, location) in FACTORY_LOCATIONS.items():
         obj = bpy.data.objects.get(name)
         if obj is not None and _is_factory_object(obj, kind, location):
             obj.location = [value * LOCATION_FACTOR for value in obj.location]
+            if kind == "CAMERA":
+                obj.data.clip_start *= LOCATION_FACTOR
+                obj.data.clip_end *= LOCATION_FACTOR
 
 
 def _remove_animation_workspace() -> None:

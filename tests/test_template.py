@@ -85,6 +85,17 @@ class SetupNewFileTest(unittest.TestCase):
             for value in obj.scale:
                 self.assertAlmostEqual(value, 1.0, places=6)
 
+    def test_default_camera_clip_range_grows_with_its_distance(self):
+        camera = bpy.data.objects["Camera"]
+        start, end = camera.data.clip_start, camera.data.clip_end
+        self.template.setup_new_file()
+        self.assertAlmostEqual(camera.data.clip_start, start * 10, places=4)
+        self.assertAlmostEqual(camera.data.clip_end, end * 10, places=3)
+        # The cube (at the origin) is well inside the clip range.
+        self.assertLess(camera.location.length + 20.0, camera.data.clip_end)
+        self.template.setup_new_file()  # only once
+        self.assertAlmostEqual(camera.data.clip_end, end * 10, places=3)
+
     def test_camera_and_light_are_moved_only_once(self):
         self.template.setup_new_file()
         once = {n: tuple(bpy.data.objects[n].location) for n in ("Camera", "Light")}
@@ -97,7 +108,9 @@ class SetupNewFileTest(unittest.TestCase):
         camera, light = bpy.data.objects["Camera"], bpy.data.objects["Light"]
         camera.location = (1, 2, 3)
         light.location = (4.0, 1.0, 5.9)  # close to the factory spot, but moved
+        clip_end = camera.data.clip_end
         self.template.setup_new_file()
+        self.assertEqual(camera.data.clip_end, clip_end)
         self.assertEqual(tuple(round(v, 4) for v in camera.location), (1.0, 2.0, 3.0))
         self.assertEqual(tuple(round(v, 4) for v in light.location), (4.0, 1.0, 5.9))
 
