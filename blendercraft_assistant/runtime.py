@@ -21,7 +21,7 @@ from bpy.app.handlers import persistent
 
 from . import mainthread
 from .claude.process import TOOL_PREFIX, ClaudeProcess, build_args, find_claude
-from .claude.session import NOTE_KEYS, AgentSession
+from .claude.session import MAX_TOOL_CALLS, NOTE_KEYS, AgentSession
 from .claude.system_prompt import build_system_prompt
 from .conversations import ConversationStore
 from .i18n import lang, t
@@ -327,6 +327,7 @@ def _make_session(conversation) -> AgentSession:
         store,
         _spawn,
         _tool_kind,
+        max_tool_calls=MAX_TOOL_CALLS,
         notes={key: t(key) for key in NOTE_KEYS},  # templates, filled by the session
         on_turn_begin=_on_turn_begin,
     )
@@ -422,6 +423,7 @@ def _spawn(resume_id, on_line, on_exit):
             bpy.app.version_string,
             get_display_unit(bpy.context.scene).lower(),
             lang(),
+            MAX_TOOL_CALLS,
         ),
         plugin_dir=str(PLUGIN_DIR),
         read_tools=[tool.name for tool in REGISTRY.values() if tool.kind == "read"],

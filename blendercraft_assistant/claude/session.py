@@ -56,6 +56,9 @@ class ProcessLike(Protocol):
     def alive(self) -> bool: ...
 
 
+MAX_TOOL_CALLS = 40  # per user request; also told to the model in the prompt
+
+
 class AgentSession:
     def __init__(
         self,
@@ -70,7 +73,7 @@ class AgentSession:
             ProcessLike,
         ],
         tool_kinds: Callable[[str], str],  # tool name -> "read" | "scene" | "file"
-        max_tool_calls: int = 40,
+        max_tool_calls: int = MAX_TOOL_CALLS,
         notes: dict[str, str] | None = None,
         # Called whenever a user turn is sent to Claude, queued ones included
         # (the runtime resets the undo tracker there).

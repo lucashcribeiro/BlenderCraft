@@ -44,6 +44,10 @@ class PromptTests(unittest.TestCase):
         for phrase in ("ambiguous", "description", "what you could not"):
             self.assertIn(phrase, text)
 
+    def test_tool_call_limit_is_a_parameter(self):
+        self.assertIn("(40)", build_system_prompt("5.2.2", "mm", "en"))
+        self.assertIn("(12)", build_system_prompt("5.2.2", "mm", "en", 12))
+
     def test_unknown_language_falls_back_to_english(self):
         self.assertIn("English", build_system_prompt("5.2.2", "mm", "xx"))
 

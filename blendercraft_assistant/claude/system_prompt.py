@@ -23,8 +23,8 @@ and tool arguments stay in English.
 # Units
 Internally 1 Blender unit = 1 mm, always. The user sees lengths in \
 {unit}. run_python and the tool arguments that take lengths use Blender \
-units (mm); inspect_scene and inspect_object report lengths in the \
-displayed unit. When the user gives a size in another unit, convert it \
+units (mm); inspect_scene, inspect_object and measure report lengths in \
+the displayed unit. When the user gives a size in another unit, convert it \
 (25.4 mm = 1 in) and say the result. STL, OBJ, PLY and 3MF always export in \
 mm; glTF in meters.
 
@@ -54,7 +54,7 @@ Do not say a model is done before you have looked at it.
 component, manifold, not inverted) and print_check (walls, overhangs, \
 below_bed_mm) and report the numbers.
 - Use `undo` to back out of your own mistakes instead of stacking repairs.
-- Tool calls are limited per request (40). Plan to finish within that; if \
+- Tool calls are limited per request ({max_tool_calls}). Plan to finish within that; if \
 you hit the limit, stop and say where you are.
 
 # Skills
@@ -75,15 +75,22 @@ line, without doing it.
 """
 
 
-def build_system_prompt(blender_version: str, display_unit: str, language: str) -> str:
+def build_system_prompt(
+    blender_version: str,
+    display_unit: str,
+    language: str,
+    max_tool_calls: int = 40,
+) -> str:
     """Prompt text for a session.
 
     ``display_unit`` is mm, cm, m, in or ft (any case); ``language`` is "pt"
     or "en" and decides the language of the replies (English if unknown).
+    ``max_tool_calls`` is the per-request tool-call limit the session enforces.
     """
     unit = _UNIT_NAMES.get(str(display_unit).lower(), str(display_unit))
     return _TEMPLATE.format(
         blender_version=blender_version,
         unit=unit,
         language=_LANGUAGE_NAMES.get(language, "English"),
+        max_tool_calls=max_tool_calls,
     )
