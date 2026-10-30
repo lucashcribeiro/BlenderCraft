@@ -170,6 +170,23 @@ class PrintCheckTest(TopologyTestBase):
         self.assertEqual(info["thin_faces"], 0)
         self.assertLess(abs(info["min_wall_mm"] - 20.0), 0.01)
 
+    def test_twisted_quad_is_not_a_thin_wall(self):
+        # A raised corner makes the top quad non-planar: its center is off the
+        # surface, but the solid is still 20 mm thick.
+        for corner in range(4):
+            with self.subTest(corner=corner):
+                _clear_scene()
+
+                def build(bm):
+                    _cube(bm, 20, center=(0, 0, 10))
+                    top = max(bm.faces, key=lambda f: f.calc_center_median().z)
+                    top.verts[corner].co.z += 0.05
+
+                _make_object("Twist", build)
+                info = topology.print_check("Twist")
+                self.assertEqual(info["thin_faces"], 0)
+                self.assertLess(abs(info["min_wall_mm"] - 20.0), 0.1)
+
     def test_min_wall_threshold_argument(self):
         _make_object("Cube", lambda bm: _cube(bm, 20), location=(0, 0, 10))
         info = topology.print_check("Cube", min_wall_mm=25.0)

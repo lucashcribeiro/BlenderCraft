@@ -100,25 +100,29 @@ def print_check(
             bmesh.ops.reverse_faces(bm, faces=bm.faces[:])
             bm.normal_update()
 
-        # Thin walls: from each face center, shoot inward and measure the
-        # distance to the first surface hit.
+        # Thin walls: from the centroid of each loop triangle (a point exactly
+        # on the surface, unlike the center of a non-planar quad), shoot
+        # inward and measure the distance to the first surface hit. A face's
+        # wall is the thinnest of its triangles.
         tree = BVHTree.FromBMesh(bm)
         bias = _RAY_BIAS_MM / mm
-        thin_faces = 0
-        wall = math.inf
-        for face in bm.faces:
-            normal = face.normal
+        bm.faces.index_update()
+        face_wall: dict[int, float] = {}
+        for tri in bm.calc_loop_triangles():
+            a, b, c = (loop.vert.co for loop in tri)
+            normal = (b - a).cross(c - a)
             if normal.length == 0.0:
                 continue
-            direction = -normal
-            origin = face.calc_center_median() + direction * bias
+            direction = -normal.normalized()
+            origin = (a + b + c) / 3 + direction * bias
             hit = tree.ray_cast(origin, direction)
             if hit[0] is None:
                 continue
             distance_mm = (hit[3] + bias) * mm
-            wall = min(wall, distance_mm)
-            if distance_mm < min_wall_mm:
-                thin_faces += 1
+            index = tri[0].face.index
+            face_wall[index] = min(face_wall.get(index, math.inf), distance_mm)
+        wall = min(face_wall.values(), default=math.inf)
+        thin_faces = sum(1 for d in face_wall.values() if d < min_wall_mm)
 
         # Overhangs: faces looking down, unless they sit on the bed.
         lowest = min((v.co.z for v in bm.verts), default=0.0)
