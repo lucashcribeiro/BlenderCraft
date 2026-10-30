@@ -162,7 +162,9 @@ class BuildArgsTest(unittest.TestCase):
             resume=None,
         )
         kw.update(over)
-        return build_args("/bin/claude", **kw)
+        args = build_args("/bin/claude", **kw)
+        self.addCleanup(Path(self._value(args, "--mcp-config")).unlink, missing_ok=True)
+        return args
 
     def _value(self, args, flag):
         return args[args.index(flag) + 1]
@@ -183,7 +185,8 @@ class BuildArgsTest(unittest.TestCase):
             self.assertEqual(self._value(args, flag), value)
         for flag in ("--include-partial-messages", "--verbose", "--strict-mcp-config"):
             self.assertIn(flag, args)
-        config = json.loads(self._value(args, "--mcp-config"))
+        path = self._value(args, "--mcp-config")
+        config = json.loads(Path(path).read_text(encoding="utf-8"))
         self.assertEqual(
             config,
             {
@@ -198,6 +201,18 @@ class BuildArgsTest(unittest.TestCase):
         )
         self.assertNotIn("--model", args)
         self.assertNotIn("--resume", args)
+
+    def test_token_is_not_in_argv_and_config_file_is_private(self):
+        args = self._args("AUTO", token="s3cret-token")
+        path = self._value(args, "--mcp-config")
+        self.assertFalse(any("s3cret-token" in a for a in args))
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertEqual(process_module.mcp_config_file(args), path)
+        config = json.loads(Path(path).read_text(encoding="utf-8"))
+        self.assertEqual(
+            config["mcpServers"]["blendercraft"]["headers"],
+            {"Authorization": "Bearer s3cret-token"},
+        )
 
     def test_build_args_modes(self):
         auto = self._args("AUTO")
@@ -230,8 +245,10 @@ class BuildArgsTest(unittest.TestCase):
         self.assertNotIn("--permission-prompt-tool", ro)
 
     def test_unknown_mode(self):
-        with self.assertRaises(ValueError):
-            self._args("YOLO")
+        with mock.patch.object(process_module.tempfile, "mkstemp") as mkstemp:
+            with self.assertRaises(ValueError):
+                self._args("YOLO")
+        mkstemp.assert_not_called()  # no config file left behind
 
     def test_model_and_resume(self):
         args = self._args("AUTO", model="haiku", resume="sess-1")
@@ -241,6 +258,39 @@ class BuildArgsTest(unittest.TestCase):
     def test_tools_flag_value_is_a_real_empty_argument(self):
         args = self._args("AUTO")
         self.assertEqual(args[args.index("--tools") + 1], "")
+
+
+class ConfigFileLifecycleTest(unittest.TestCase):
+    def _args(self):
+        return build_args(
+            sys.executable, mcp_url="http://127.0.0.1:1/mcp", token="t",
+            mode="AUTO", model="", system_prompt="", plugin_dir="/p",
+            read_tools=[], write_tools=[], resume=None,
+        )
+
+    def test_unrelated_path_is_not_a_config_file(self):
+        self.assertIsNone(process_module.mcp_config_file(["claude", "-p"]))
+        self.assertIsNone(
+            process_module.mcp_config_file(["claude", "--mcp-config", "/etc/passwd"])
+        )
+
+    def test_stop_deletes_config_even_if_never_started(self):
+        args = self._args()
+        path = process_module.mcp_config_file(args)
+        self.assertTrue(os.path.exists(path))
+        ClaudeProcess(args, cwd=str(TESTS_DIR), on_line=print, on_exit=print).stop()
+        self.assertFalse(os.path.exists(path))
+
+    def test_exit_deletes_config(self):
+        # `python -c pass` with the config path in the real argv position.
+        path = process_module.mcp_config_file(self._args())
+        args = [sys.executable, "-c", "pass", "--mcp-config", path]
+        done = threading.Event()
+        proc = ClaudeProcess(args, str(TESTS_DIR), lambda l: None, lambda *a: done.set())
+        proc.start()
+        self.assertTrue(done.wait(10))
+        self.assertFalse(os.path.exists(path))
+        proc.stop()
 
 
 class FindClaudeTest(unittest.TestCase):

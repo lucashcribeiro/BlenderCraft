@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -72,6 +73,36 @@ def find_claude(pref_path: str = "") -> str | None:
     return None
 
 
+_CONFIG_PREFIX = "blendercraft-mcp-"
+
+
+def _write_mcp_config(config: dict) -> str:
+    """Write the MCP config (it holds the bearer token) to a 0600 temp file.
+
+    argv is visible to every local user via `ps`, a file with owner-only
+    permissions is not. ClaudeProcess deletes the file on exit/stop."""
+    fd, path = tempfile.mkstemp(prefix=_CONFIG_PREFIX, suffix=".json")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(config, handle)
+    except BaseException:
+        try:
+            os.unlink(path)
+        finally:
+            raise
+    return path
+
+
+def mcp_config_file(args: list[str]) -> str | None:
+    """Path of the temp MCP config file that build_args put in args."""
+    try:
+        path = args[args.index("--mcp-config") + 1]
+    except (ValueError, IndexError):
+        return None
+    return path if os.path.basename(path).startswith(_CONFIG_PREFIX) else None
+
+
 def build_args(
     claude: str,
     *,
@@ -85,6 +116,14 @@ def build_args(
     write_tools: list[str],
     resume: str | None,
 ) -> list[str]:
+    """Arguments for the headless CLI.
+
+    Side effect: the MCP config (with the token) is written to a 0600 temp
+    file whose path goes after --mcp-config. Pass the result to
+    ClaudeProcess, which removes the file on exit/stop; callers that do not
+    start a process should delete it with mcp_config_file(args)."""
+    if mode not in ("AUTO", "ASK", "READONLY"):
+        raise ValueError(f"Unknown mode: {mode!r}")  # before any file is written
     mcp_config = {
         "mcpServers": {
             MCP_SERVER_NAME: {
@@ -101,7 +140,7 @@ def build_args(
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",
-        "--mcp-config", json.dumps(mcp_config),
+        "--mcp-config", _write_mcp_config(mcp_config),
         "--strict-mcp-config",
         "--tools", "",
         "--setting-sources", "",
@@ -118,14 +157,12 @@ def build_args(
             "--permission-prompts", "host",
             "--permission-prompt-tool", f"{TOOL_PREFIX}approve_action",
         ]
-    elif mode == "READONLY":
+    else:  # READONLY
         args += [
             "--allowedTools", reads,
             "--disallowedTools", writes,
             "--permission-prompts", "none",
         ]
-    else:
-        raise ValueError(f"Unknown mode: {mode!r}")
     if model:
         args += ["--model", model]
     if resume:
@@ -148,6 +185,7 @@ class ClaudeProcess:
         self._proc: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
         self._write_lock = threading.Lock()
+        self._config_file = mcp_config_file(args)
 
     def start(self) -> None:
         if self._proc is not None:
@@ -179,6 +217,7 @@ class ClaudeProcess:
                         pass
         finally:
             code = proc.wait()
+            self._remove_config_file()
             try:
                 self._on_exit(code)
             except Exception:
@@ -206,9 +245,18 @@ class ClaudeProcess:
             except OSError:
                 pass
 
+    def _remove_config_file(self) -> None:
+        path, self._config_file = self._config_file, None
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
     def stop(self) -> None:
         proc = self._proc
         if proc is None:
+            self._remove_config_file()
             return
         if proc.poll() is None:
             proc.terminate()
@@ -229,6 +277,7 @@ class ClaudeProcess:
                 proc.stdout.close()
         except OSError:
             pass
+        self._remove_config_file()
 
     @property
     def alive(self) -> bool:
