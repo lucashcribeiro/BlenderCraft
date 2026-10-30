@@ -14,6 +14,7 @@ Lengths and points are in Blender units (1 BU = 1 mm); angles are degrees.
 
 import math
 
+import bmesh
 import bpy
 from mathutils import Euler, Matrix
 from mathutils.bvhtree import BVHTree
@@ -24,6 +25,8 @@ from .inspect import _get_object
 _AXES = ("X", "Y", "Z")
 # The sweep treats a limit as reached when it is this close (degrees).
 _ANGLE_EPS = 1e-9
+# Largest number of angles a single joint_test may visit.
+_MAX_STEPS = 1440
 
 
 def _check_axis(axis: str) -> str:
@@ -98,22 +101,44 @@ def _moving_meshes(pivot_obj) -> list:
     return meshes
 
 
-def _world_tree(obj, depsgraph) -> BVHTree:
-    """BVH of the evaluated mesh of ``obj`` in world space.
+def _local_bmesh(obj, depsgraph) -> bmesh.types.BMesh:
+    """Evaluated mesh of ``obj`` (modifiers applied) in object space.
 
-    ``BVHTree.FromObject`` would be in object space, which is useless for
-    comparing objects, so the tree is built from world-space triangles.
+    Extracted once per mesh per joint_test: the geometry does not change
+    while the pivot turns, only the world matrix does.
     """
     evaluated = obj.evaluated_get(depsgraph)
     mesh = evaluated.to_mesh()
     try:
-        matrix = evaluated.matrix_world
-        verts = [matrix @ v.co for v in mesh.vertices]
-        mesh.calc_loop_triangles()
-        tris = [tuple(t.vertices) for t in mesh.loop_triangles]
+        bm = bmesh.new()
+        bm.from_mesh(mesh)
     finally:
         evaluated.to_mesh_clear()
-    return BVHTree.FromPolygons(verts, tris, all_triangles=True)
+    return bm
+
+
+def _obstacle_tree(obj, depsgraph) -> BVHTree:
+    """BVH of a static mesh in world space (built once).
+
+    ``BVHTree.FromObject`` would be in object space, which is useless for
+    comparing objects.
+    """
+    bm = _local_bmesh(obj, depsgraph)
+    try:
+        bm.transform(obj.evaluated_get(depsgraph).matrix_world)
+        return BVHTree.FromBMesh(bm)
+    finally:
+        bm.free()
+
+
+def _posed_tree(local_bm, matrix) -> BVHTree:
+    """BVH of a moving mesh in world space for the given world matrix."""
+    posed = local_bm.copy()
+    try:
+        posed.transform(matrix)
+        return BVHTree.FromBMesh(posed)
+    finally:
+        posed.free()
 
 
 def _default_obstacles(moving: list) -> list:
@@ -163,6 +188,11 @@ def joint_test(
         raise ValueError("start must be 0 or negative")
     if end < 0:
         raise ValueError("end must be 0 or positive")
+    if (end - start) / step > _MAX_STEPS + _ANGLE_EPS:
+        raise ValueError(
+            f"too many steps: {(end - start) / step:.0f} (max {_MAX_STEPS}); "
+            "use a larger step"
+        )
     pivot_obj = _get_pivot(pivot)
     moving = _moving_meshes(pivot_obj)
     if against is None:
@@ -179,17 +209,20 @@ def joint_test(
     saved_rotation = pivot_obj.rotation_euler.copy()
     saved_mode = pivot_obj.rotation_mode
     saved_angle = pivot_obj.get("bc_angle")
+    moving_meshes: list = []  # (object, local-space bmesh), freed in finally
     try:
         bpy.context.view_layer.update()
         depsgraph = bpy.context.evaluated_depsgraph_get()
-        static_trees = [(o.name, _world_tree(o, depsgraph)) for o in obstacles]
+        static_trees = [(o.name, _obstacle_tree(o, depsgraph)) for o in obstacles]
+        for part in moving:
+            moving_meshes.append((part, _local_bmesh(part, depsgraph)))
 
         def collision_with() -> str | None:
-            # Called after set_angle: refresh the depsgraph before the trees.
+            # Called after set_angle: refresh the depsgraph first.
             bpy.context.view_layer.update()
             graph = bpy.context.evaluated_depsgraph_get()
-            for part in moving:
-                tree = _world_tree(part, graph)
+            for part, local_bm in moving_meshes:
+                tree = _posed_tree(local_bm, part.evaluated_get(graph).matrix_world)
                 for name, other in static_trees:
                     if tree.overlap(other):
                         return name
@@ -224,6 +257,8 @@ def joint_test(
             "collisions": collisions,
         }
     finally:
+        for _, local_bm in moving_meshes:
+            local_bm.free()
         pivot_obj.rotation_mode = saved_mode
         pivot_obj.rotation_euler = saved_rotation
         if saved_angle is None:

@@ -1,6 +1,7 @@
 import json
 import math
 import unittest
+from unittest import mock
 
 import bmesh
 import bpy
@@ -196,6 +197,22 @@ class JointTestSweep(JointTestBase):
         result = joints.joint_test(self.pivot)
         self.assertTrue(result["free_max"] < 90.0)
         self.assertNotIn("Child", [c["with"] for c in result["collisions"]])
+
+    def test_extracts_each_mesh_once_not_per_step(self):
+        self._obstacle((0, 6, 0))
+        self._obstacle((0, -6, 0), "Other")
+        real = joints._local_bmesh
+        with mock.patch.object(joints, "_local_bmesh", wraps=real) as extract:
+            joints.joint_test(self.pivot, start=-90.0, end=90.0, step=1.0)
+        # One moving mesh (Bar) and two obstacles, however many steps ran.
+        self.assertEqual(extract.call_count, 3)
+
+    def test_step_count_is_capped(self):
+        with self.assertRaises(ValueError) as ctx:
+            joints.joint_test(self.pivot, start=-180.0, end=180.0, step=0.2)
+        self.assertIn("step", str(ctx.exception))
+        # 1440 steps exactly is still allowed.
+        joints.joint_test(self.pivot, start=-180.0, end=180.0, step=0.25)
 
     def test_invalid_range(self):
         with self.assertRaises(ValueError):
