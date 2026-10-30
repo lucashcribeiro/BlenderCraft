@@ -183,6 +183,122 @@ class RegisterTest(unittest.TestCase):
         self.assertEqual(self.template.timeline_areas(screen), [timeline])
 
 
+class _Recorder:
+    """Stands in for temp_override and area_close and notes when they ran."""
+
+    def __init__(self):
+        self.current_area = None
+        self.depth = 0
+        self.closes = []  # context depth at each area_close
+        self.sets = []  # (property, value, context depth)
+
+    @contextlib.contextmanager
+    def override(self, window, screen, area):
+        self.current_area = area
+        self.depth += 1
+        try:
+            yield
+        finally:
+            self.depth -= 1
+            self.current_area = None
+
+    def area_close(self):
+        self.closes.append(self.depth)
+        area = self.current_area
+        screens = [w.screen for w in self.windows if area in w.screen.areas]
+        for screen in screens:
+            screen.areas.remove(area)
+
+
+class _Space:
+    def __init__(self, recorder, kind):
+        object.__setattr__(self, "type", kind)
+        object.__setattr__(self, "_recorder", recorder)
+
+    def __setattr__(self, name, value):
+        self._recorder.sets.append((name, value, self._recorder.depth))
+        object.__setattr__(self, name, value)
+
+
+def _stub_area(recorder, kind, ui_type=None):
+    ui_type = ui_type or kind
+    return types.SimpleNamespace(
+        type=kind, ui_type=ui_type, spaces=[_Space(recorder, kind)]
+    )
+
+
+def _stub_window(workspace, areas):
+    return types.SimpleNamespace(
+        workspace=types.SimpleNamespace(name=workspace),
+        screen=types.SimpleNamespace(areas=list(areas)),
+    )
+
+
+class TweakUiGuiBranchTest(unittest.TestCase):
+    """The window branch of _tweak_ui, with stand-ins for windows and areas.
+
+    Real windows do not exist in -b, and UI changes outside a window context
+    crash Blender, so what matters is that they all run inside the override.
+    """
+
+    def setUp(self):
+        self.template = load_template()
+        self.rec = _Recorder()
+
+    def run_tweak(self, windows, unsaved=True):
+        self.rec.windows = windows
+        with mock.patch.object(self.template, "_windows", return_value=windows), mock.patch.object(
+            self.template, "_override", self.rec.override
+        ), mock.patch.object(self.template, "_area_close", self.rec.area_close), mock.patch.object(
+            self.template, "_unsaved", return_value=unsaved
+        ):
+            return self.template._tweak_ui()
+
+    def test_layout_gets_sidebar_and_no_timeline_inside_the_override(self):
+        view = _stub_area(self.rec, "VIEW_3D")
+        timeline = _stub_area(self.rec, "DOPESHEET_EDITOR", "TIMELINE")
+        other = _stub_area(self.rec, "OUTLINER")
+        window = _stub_window("Layout", [other, timeline, view])
+        self.assertIsNone(self.run_tweak([window]))
+        self.assertEqual(window.screen.areas, [other, view])
+        self.assertEqual(self.rec.closes, [1])
+        self.assertEqual(self.rec.sets, [("show_region_ui", True, 1)])
+
+    def test_every_timeline_is_closed(self):
+        timelines = [_stub_area(self.rec, "DOPESHEET_EDITOR", "TIMELINE") for _ in range(3)]
+        window = _stub_window("Layout", [*timelines, _stub_area(self.rec, "VIEW_3D")])
+        self.run_tweak([window])
+        self.assertEqual([a.type for a in window.screen.areas], ["VIEW_3D"])
+        self.assertEqual(self.rec.closes, [1, 1, 1])
+
+    def test_a_timeline_that_will_not_close_does_not_loop_forever(self):
+        stuck = _stub_area(self.rec, "DOPESHEET_EDITOR", "TIMELINE")
+        window = _stub_window("Layout", [stuck])
+        self.rec.windows = [window]
+        with mock.patch.object(self.template, "_windows", return_value=[window]), mock.patch.object(
+            self.template, "_override", self.rec.override
+        ), mock.patch.object(self.template, "_area_close", lambda: self.rec.closes.append(1)):
+            self.template._tweak_ui()
+        self.assertLessEqual(len(self.rec.closes), self.template.MAX_CLOSES)
+
+    def test_other_workspaces_are_skipped(self):
+        timeline = _stub_area(self.rec, "DOPESHEET_EDITOR", "TIMELINE")
+        view = _stub_area(self.rec, "VIEW_3D")
+        window = _stub_window("Modeling", [timeline, view])
+        self.run_tweak([window])
+        self.assertEqual(window.screen.areas, [timeline, view])
+        self.assertEqual(self.rec.closes, [])
+        self.assertEqual(self.rec.sets, [])
+
+    def test_named_files_are_skipped(self):
+        timeline = _stub_area(self.rec, "DOPESHEET_EDITOR", "TIMELINE")
+        window = _stub_window("Layout", [timeline, _stub_area(self.rec, "VIEW_3D")])
+        self.assertIsNone(self.run_tweak([window], unsaved=False))
+        self.assertIn(timeline, window.screen.areas)
+        self.assertEqual(self.rec.closes, [])
+        self.assertEqual(self.rec.sets, [])
+
+
 @unittest.skipUnless(shutil.which("bash"), "bash not available")
 class InstallScriptTest(unittest.TestCase):
     def setUp(self):

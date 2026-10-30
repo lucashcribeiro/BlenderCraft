@@ -21,6 +21,7 @@ DEFAULT_CUBE_SIZE_MM = 20.0
 # The window may take a moment to exist after startup: retry for ~10 s.
 RETRY_INTERVAL = 0.5
 MAX_ATTEMPTS = 20
+MAX_CLOSES = 8
 _attempts = 0
 
 
@@ -78,7 +79,7 @@ def _remove_animation_workspace() -> None:
 @persistent
 def setup_new_file(*_args) -> None:
     """Prepare a new, unsaved file. Does nothing for files with a name."""
-    if bpy.data.filepath != "":
+    if not _unsaved():
         return
     scene = bpy.context.scene
     if scene is not None:
@@ -102,27 +103,54 @@ def _windows() -> list:
     return list(wm.windows) if wm else []
 
 
+def _unsaved() -> bool:
+    return bpy.data.filepath == ""
+
+
+def _override(window, screen, area):
+    """Context for UI changes. Without a window context some of them crash
+    Blender 5.2 (show_region_ui goes through ED_area_init)."""
+    return bpy.context.temp_override(window=window, screen=screen, area=area)
+
+
+def _area_close() -> None:
+    bpy.ops.screen.area_close()
+
+
+def _close_timelines(window, screen) -> None:
+    """Close every Timeline of the screen, scanning again after each close."""
+    for _ in range(MAX_CLOSES):
+        areas = timeline_areas(screen)
+        if not areas:
+            return
+        with _override(window, screen, areas[0]):
+            _area_close()
+
+
+def _open_sidebar(window, screen) -> None:
+    for area in screen.areas:
+        if area.type != "VIEW_3D":
+            continue
+        with _override(window, screen, area):
+            for space in area.spaces:
+                if space.type == "VIEW_3D":
+                    space.show_region_ui = True
+
+
 def _tweak_ui():
     """Timer: close the Layout timeline and open the sidebar. None when done."""
     global _attempts
-    if bpy.data.filepath != "":
+    if not _unsaved():
         return None
     windows = _windows()
     if not windows:
         _attempts += 1
         return RETRY_INTERVAL if _attempts < MAX_ATTEMPTS else None
     for window in windows:
-        screen = window.screen
         if window.workspace.name != "Layout":
             continue
-        for area in timeline_areas(screen):
-            with bpy.context.temp_override(window=window, screen=screen, area=area):
-                bpy.ops.screen.area_close()
-        for area in screen.areas:
-            if area.type == "VIEW_3D":
-                for space in area.spaces:
-                    if space.type == "VIEW_3D":
-                        space.show_region_ui = True
+        _close_timelines(window, window.screen)
+        _open_sidebar(window, window.screen)
     return None
 
 
