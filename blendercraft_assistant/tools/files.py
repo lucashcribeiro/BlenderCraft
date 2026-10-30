@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import bpy
+from mathutils import Matrix
 
 from ..io_3mf import export_3mf, import_3mf
 from ..units import mm_per_bu
@@ -77,6 +78,40 @@ def _keep_selection():
         )
 
 
+@contextmanager
+def _scaled_root(objs: list, scale: float):
+    """Temporarily parent objs under an empty scaled by ``scale``.
+
+    glTF has no scale option; a scaled root node turns Blender units into
+    metres without touching any mesh. Objects whose parent is not exported
+    become children of the root with their world matrix as local matrix, so
+    the exported world is ``scale`` times the scene's. Parenting, local
+    matrices and the empty itself are always restored or removed.
+    """
+    exported = {o.name for o in objs}
+    tops = [o for o in objs if o.parent is None or o.parent.name not in exported]
+    saved = [(o, o.parent, o.matrix_parent_inverse.copy(), o.matrix_basis.copy()) for o in tops]
+    worlds = [o.matrix_world.copy() for o in tops]
+    root = bpy.data.objects.new("BlenderCraft_gltf_root", None)
+    bpy.context.scene.collection.objects.link(root)
+    try:
+        root.scale = (scale, scale, scale)
+        bpy.context.view_layer.update()
+        for o, world in zip(tops, worlds):
+            o.parent = root
+            o.matrix_parent_inverse = Matrix.Identity(4)
+            o.matrix_basis = world
+        bpy.context.view_layer.update()
+        yield root
+    finally:
+        for o, parent, inverse, basis in saved:
+            o.parent = parent
+            o.matrix_parent_inverse = inverse
+            o.matrix_basis = basis
+        bpy.data.objects.remove(root, do_unlink=True)
+        bpy.context.view_layer.update()
+
+
 def _export_objects(args: dict) -> list:
     names = args.get("objects")
     if names:
@@ -109,6 +144,9 @@ def _export_with_operator(fmt: str, path: Path, objs: list, mm: float) -> None:
     ops = bpy.ops
     filepath = str(path)
     with _keep_selection():
+        if fmt in ("glb", "gltf"):
+            _export_gltf(fmt, filepath, objs, mm)
+            return
         _select_only(objs)
         # Z-up, Y-forward: slicers read the file as-is, with no axis change.
         axes = {"forward_axis": "Y", "up_axis": "Z"}
@@ -139,14 +177,21 @@ def _export_with_operator(fmt: str, path: Path, objs: list, mm: float) -> None:
                 apply_modifiers=True,
                 **axes,
             )
-        else:  # glb / gltf: unscaled, as the format defines meters and Y-up
-            _run_operator(
-                ops.export_scene.gltf,
-                filepath=filepath,
-                export_format="GLB" if fmt == "glb" else "GLTF_SEPARATE",
-                use_selection=True,
-                export_apply=True,
-            )
+        else:
+            raise ValueError(f"Unsupported format: {fmt}")
+
+
+def _export_gltf(fmt: str, filepath: str, objs: list, mm: float) -> None:
+    """glTF is in metres: export under a root scaled mm_per_bu / 1000."""
+    with _scaled_root(objs, mm / 1000.0) as root:
+        _select_only([*objs, root])
+        _run_operator(
+            bpy.ops.export_scene.gltf,
+            filepath=filepath,
+            export_format="GLB" if fmt == "glb" else "GLTF_SEPARATE",
+            use_selection=True,
+            export_apply=True,
+        )
 
 
 def _export_file(args: dict):
@@ -184,9 +229,9 @@ def _export_file(args: dict):
         "objects": [o.name for o in objs],
         "size_bytes": path.stat().st_size,
         "skipped": skipped,
+        # The unit of the file's coordinates.
+        "unit": "meter" if fmt in ("glb", "gltf") else "millimeter",
     }
-    if fmt not in ("glb", "gltf"):
-        data["unit"] = "millimeter"
     return json_result(data)
 
 
@@ -203,6 +248,8 @@ def _import_with_operator(fmt: str, path: Path, mm: float) -> None:
     elif fmt == "ply":
         _run_operator(ops.wm.ply_import, **common, **axes)
     else:
+        # glTF is in metres; Blender's importer already converts them with
+        # the scene's unit scale (1 m = 1 / scale_length BU).
         _run_operator(ops.import_scene.gltf, filepath=filepath)
 
 
@@ -250,7 +297,8 @@ register_tool(
         description=(
             "Import a mesh file into the scene: .stl, .obj, .ply, .glb, .gltf "
             "or .3mf. STL, OBJ and PLY are assumed to be in millimeters; 3MF "
-            "uses the unit declared in the file. The new objects are "
+            "uses the unit declared in the file; glTF is in meters. Sizes "
+            "are converted to the scene's units. The new objects are "
             "selected. Returns their names and dimensions in mm."
         ),
         input_schema={
@@ -271,8 +319,9 @@ register_tool(
             "extension (.stl, .obj, .ply, .glb, .gltf, .3mf) unless 'format' "
             "is given. Without 'objects' the current selection is exported. "
             "Modifiers are applied. STL, OBJ, PLY and 3MF are always written "
-            "in millimeters, whatever the scene unit; glTF is written "
-            "without scaling. Selection and active object are restored."
+            "in millimeters and glTF in meters (its specification), whatever "
+            "the scene unit. Hidden objects are rejected. Selection and "
+            "active object are restored."
         ),
         input_schema={
             "type": "object",

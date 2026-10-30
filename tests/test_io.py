@@ -118,6 +118,33 @@ def _mesh_vertices(obj_el):
     ]
 
 
+def _gltf_world_extent(path):
+    """World-space bbox size of the first mesh node in a .gltf, from accessors."""
+    doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    nodes = doc["nodes"]
+    parent = {c: i for i, n in enumerate(nodes) for c in n.get("children", [])}
+    (index,) = [i for i, n in enumerate(nodes) if "mesh" in n]
+    scale = 1.0
+    chain = index
+    while chain is not None:
+        # Uniform scales only: the Y-up rotation just permutes the axes.
+        scale *= nodes[chain].get("scale", [1.0])[0]
+        chain = parent.get(chain)
+    prim = doc["meshes"][nodes[index]["mesh"]]["primitives"][0]
+    acc = doc["accessors"][prim["attributes"]["POSITION"]]
+    return [(hi - lo) * scale for lo, hi in zip(acc["min"], acc["max"])]
+
+
+def _world_bbox(obj):
+    """(center, size) of the object's bounding box in world space."""
+    from mathutils import Vector
+
+    corners = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
+    lo = [min(c[i] for c in corners) for i in range(3)]
+    hi = [max(c[i] for c in corners) for i in range(3)]
+    return [(a + b) / 2 for a, b in zip(lo, hi)], [b - a for a, b in zip(lo, hi)]
+
+
 class IoTestBase(unittest.TestCase):
     def setUp(self):
         _clear_scene()
@@ -514,18 +541,6 @@ class OtherFormatsTest(IoTestBase):
         for extent in _extent(coords):
             self.assertAlmostEqual(extent, 20.0, places=3)
 
-    def test_gltf_export_and_import(self):
-        _cube("Cube", 20.0)
-        for ext in ("glb", "gltf"):
-            with self.subTest(ext=ext):
-                path = self.export(f"c.{ext}", objects=["Cube"])
-                self.assertGreater(path.stat().st_size, 0)
-                before = set(bpy.data.objects.keys())
-                info = self.import_(path)
-                self.assertTrue(info["objects"])
-                for entry in info["objects"]:
-                    self.assertNotIn(entry["name"], before)
-
     def test_format_overrides_extension(self):
         _cube("Cube", 20.0)
         path = self.export("noext", objects=["Cube"], format="stl")
@@ -583,6 +598,115 @@ class OtherFormatsTest(IoTestBase):
             "export_file", {"path": str(self.dir / "c.stl"), "objects": ["Ghost"]}
         )
         self.assertTrue(result.is_error)
+
+
+class GltfTest(IoTestBase):
+    def _imported_meshes(self, path):
+        before = set(bpy.data.objects.keys())
+        info = self.import_(path)
+        self.assertTrue(info["objects"])
+        names = [o["name"] for o in info["objects"]]
+        self.assertTrue(set(names).isdisjoint(before))
+        bpy.context.view_layer.update()
+        return [bpy.data.objects[n] for n in names if bpy.data.objects[n].type == "MESH"]
+
+    def test_gltf_is_written_in_metres(self):
+        _cube("Cube", 20.0)
+        path = self.export("c.gltf", objects=["Cube"])
+        for extent in _gltf_world_extent(path):
+            self.assertAlmostEqual(extent, 0.02, places=5)
+
+    def test_gltf_in_metres_scene_is_unscaled(self):
+        scene = bpy.context.scene
+        scene.unit_settings.system = "METRIC"
+        scene.unit_settings.scale_length = 1.0
+        _cube("Cube", 0.02)
+        path = self.export("c.gltf", objects=["Cube"])
+        for extent in _gltf_world_extent(path):
+            self.assertAlmostEqual(extent, 0.02, places=5)
+
+    def test_gltf_roundtrip_in_mm_scene(self):
+        _cube("Cube", 20.0, location=(5.0, 6.0, 7.0))
+        for ext in ("glb", "gltf"):
+            with self.subTest(ext=ext):
+                path = self.export(f"c.{ext}", objects=["Cube"])
+                (mesh,) = self._imported_meshes(path)
+                center, size = _world_bbox(mesh)
+                for value in size:
+                    self.assertAlmostEqual(value, 20.0, places=3)
+                self.assertEqual(sorted(round(c, 3) for c in center), [5.0, 6.0, 7.0])
+                bpy.data.objects.remove(mesh, do_unlink=True)
+
+    def test_gltf_import_into_metres_scene(self):
+        _cube("Cube", 20.0)
+        path = self.export("c.glb", objects=["Cube"])
+        _clear_scene()
+        scene = bpy.context.scene
+        scene.unit_settings.system = "METRIC"
+        scene.unit_settings.scale_length = 1.0
+        (mesh,) = self._imported_meshes(path)
+        for value in _world_bbox(mesh)[1]:
+            self.assertAlmostEqual(value, 0.02, places=6)
+
+    def test_gltf_hierarchy_keeps_relative_placement(self):
+        a = _cube("A", 20.0)
+        b = _cube("B", 20.0)
+        b.parent = a
+        b.location = (50.0, 0.0, 0.0)
+        bpy.context.view_layer.update()
+        path = self.export("h.glb", objects=["A", "B"])
+        _clear_scene()
+        meshes = self._imported_meshes(path)
+        self.assertEqual(len(meshes), 2)
+        (ca, _), (cb, _) = (_world_bbox(m) for m in meshes)
+        distance = sum((x - y) ** 2 for x, y in zip(ca, cb)) ** 0.5
+        self.assertAlmostEqual(distance, 50.0, places=3)
+
+    def test_gltf_selected_child_of_unselected_parent_keeps_world_position(self):
+        parent = _cube("P", 20.0, location=(100.0, 0.0, 0.0))
+        child = _cube("C", 10.0)
+        child.parent = parent
+        child.location = (30.0, 0.0, 0.0)
+        bpy.context.view_layer.update()
+        self.assertAlmostEqual(child.matrix_world.translation.x, 130.0, places=4)
+        path = self.export("c.glb", objects=["C"])
+        _clear_scene()
+        (mesh,) = self._imported_meshes(path)
+        center, size = _world_bbox(mesh)
+        for value in size:
+            self.assertAlmostEqual(value, 10.0, places=3)
+        self.assertEqual(sorted(round(c, 3) for c in center), [0.0, 0.0, 130.0])
+
+    def test_gltf_export_leaves_scene_untouched(self):
+        parent = _cube("P", 20.0, location=(100.0, 0.0, 0.0))
+        child = _cube("C", 10.0)
+        child.parent = parent
+        child.location = (30.0, 0.0, 0.0)
+        loose = _cube("L", 10.0, location=(0.0, 40.0, 0.0))
+        bpy.context.view_layer.update()
+        before = {
+            o.name: (o.parent, o.matrix_parent_inverse.copy(), o.matrix_basis.copy(), o.matrix_world.copy())
+            for o in bpy.data.objects
+        }
+        self.export("u.glb", objects=["C", "L"])
+        self.assertEqual(set(bpy.data.objects.keys()), set(before))
+        for o in bpy.data.objects:
+            parent_, inverse, basis, world = before[o.name]
+            self.assertIs(o.parent, parent_)
+            self.assertEqual(o.matrix_parent_inverse, inverse)
+            self.assertEqual(o.matrix_basis, basis)
+            self.assertEqual(o.matrix_world, world)
+        self.assertIsNotNone(loose)
+
+    def test_gltf_export_cleans_up_on_error(self):
+        _cube("Cube", 20.0)
+        before = set(bpy.data.objects.keys())
+        result = call_tool(
+            "export_file", {"path": str(self.dir), "objects": ["Cube"], "format": "glb"}
+        )
+        self.assertTrue(result.is_error)
+        self.assertEqual(set(bpy.data.objects.keys()), before)
+        self.assertIsNone(bpy.data.objects["Cube"].parent)
 
 
 class SelectionRestoreTest(IoTestBase):
