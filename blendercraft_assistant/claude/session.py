@@ -9,6 +9,7 @@ handle_exit.
 This module must not import bpy.
 """
 
+import logging
 import time
 from collections.abc import Callable
 from typing import Protocol
@@ -22,6 +23,8 @@ from .stream import (
     TurnFinished,
     parse_line,
 )
+
+log = logging.getLogger(__name__)
 
 IDLE = "IDLE"
 WORKING = "WORKING"
@@ -305,4 +308,10 @@ class AgentSession:
         if not self.conversation.messages:
             return  # nothing worth a file yet
         self.conversation.updated = time.time()
-        self.store.save(self.conversation)
+        try:
+            self.store.save(self.conversation)
+        except OSError as exc:  # a full disk must not break stop()/the queue
+            log.warning("Could not save conversation %s: %s", self.conversation.id, exc)
+            note = f"Could not save the conversation: {exc}"
+            if note not in self.error:
+                self.error = f"{self.error}\n{note}".strip()

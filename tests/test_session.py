@@ -440,6 +440,60 @@ class SessionStopTest(SessionTestBase):
         self.assertTrue(self.conv.messages[1].text.endswith("STEP LIMIT NOTE"))
 
 
+class FailingStore(ConversationStore):
+    def save(self, conv):
+        raise OSError("disk full")
+
+
+class SessionSaveFailureTest(SessionTestBase):
+    def setUp(self):
+        super().setUp()
+        # every save fails and logs a warning; keep it out of the test output
+        self.enterContext(
+            self.assertLogs("blendercraft_assistant.claude.session", level="WARNING")
+        )
+
+    def make_failing(self):
+        return AgentSession(
+            self.conv, FailingStore(self.store.root), self.spawn, lambda n: "read"
+        )
+
+    def test_stop_does_not_raise(self):
+        session = self.make_failing()
+        session.send("x")
+        with self.assertLogs("blendercraft_assistant.claude.session", level="WARNING"):
+            session.stop()
+        self.assertEqual(session.status, "IDLE")
+        self.assertTrue(self.procs[0].stopped)
+        self.assertIn("disk full", session.error)
+
+    def test_close_does_not_raise(self):
+        session = self.make_failing()
+        session.send("x")
+        with self.assertLogs("blendercraft_assistant.claude.session", level="WARNING"):
+            session.close()
+        self.assertTrue(self.procs[0].stopped)
+
+    def test_turn_finished_still_sends_queue(self):
+        session = self.make_failing()
+        session.send("um")
+        session.send("dois")
+        with self.assertLogs("blendercraft_assistant.claude.session", level="WARNING"):
+            self.feed_fixture(session, "text_turn")
+        self.assertEqual(self.procs[0].sent[1], [{"type": "text", "text": "dois"}])
+        self.assertEqual(session.queue, [])
+        self.assertEqual(session.status, "WORKING")
+
+    def test_save_error_does_not_hide_the_real_error(self):
+        session = self.make_failing()
+        session.send("x")
+        with self.assertLogs("blendercraft_assistant.claude.session", level="WARNING"):
+            self.exit_process(session, self.procs[0], 3, "boom")
+        self.assertEqual(session.status, "ERROR")
+        self.assertIn("boom", session.error)
+        self.assertIn("disk full", session.error)
+
+
 class SessionFailureTest(SessionTestBase):
     def _history(self, n):
         from blendercraft_assistant.conversations import Message
