@@ -10,8 +10,10 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 class FakeProcess:
-    def __init__(self, resume):
+    def __init__(self, resume, on_line=None, on_exit=None):
         self.resume = resume
+        self.on_line = on_line
+        self.on_exit = on_exit
         self.sent = []
         self.stopped = False
         self.alive = True
@@ -92,8 +94,8 @@ class SessionTestBase(unittest.TestCase):
         self.conv = self.store.new("/x.blend", "sonnet")
         self.kinds = {}
 
-    def spawn(self, resume):
-        proc = FakeProcess(resume)
+    def spawn(self, resume, on_line, on_exit):
+        proc = FakeProcess(resume, on_line, on_exit)
         self.procs.append(proc)
         return proc
 
@@ -302,8 +304,26 @@ class SessionStopTest(SessionTestBase):
         session.send("x")
         session.stop()
         session.send("y")
-        session.handle_exit(-15, "")  # late exit of the first process
+        self.procs[0].on_exit(-15, "")  # late exit of the first process
         self.assertEqual(session.status, "WORKING")
+
+    def test_send_now_drops_old_process_output(self):
+        session = self.make()
+        session.send("um")
+        old = self.procs[0]
+        session.send_now("dois")
+        new = self.procs[1]
+        old.on_line(delta_line("old text"))
+        old.on_line(tool_started_line(1))
+        old.on_line(result_line("old"))
+        old.on_exit(-15, "")
+        self.assertEqual(self.conv.messages[3].text, "")
+        self.assertEqual(self.conv.messages[3].tools, [])
+        self.assertEqual(session.status, "WORKING")
+        new.on_line(delta_line("new text"))
+        new.on_line(result_line("new"))
+        self.assertEqual(self.conv.messages[3].text, "new text")
+        self.assertEqual(session.status, "IDLE")
 
     def test_close_stops_process(self):
         session = self.make()
@@ -487,8 +507,8 @@ class SessionFailureTest(SessionTestBase):
     def test_send_fails_twice_is_error(self):
         spawned = []
 
-        def spawn(resume):
-            proc = FakeProcess(resume)
+        def spawn(resume, on_line, on_exit):
+            proc = FakeProcess(resume, on_line, on_exit)
             proc.fail_send = True
             spawned.append(proc)
             return proc
@@ -500,7 +520,7 @@ class SessionFailureTest(SessionTestBase):
         self.assertTrue(session.error)
 
     def test_spawn_exception_is_error(self):
-        def spawn(resume):
+        def spawn(resume, on_line, on_exit):
             raise OSError("claude not found")
 
         session = AgentSession(self.conv, self.store, spawn, lambda n: "read")

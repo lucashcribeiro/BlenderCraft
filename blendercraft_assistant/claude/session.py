@@ -51,7 +51,14 @@ class AgentSession:
         self,
         conversation: Conversation,
         store: ConversationStore,
-        spawn: Callable[[str | None], ProcessLike],  # receives the resume id
+        # spawn(resume_id, on_line, on_exit) -> process. The two callbacks are
+        # bound to this process; output from a replaced/stopped process is
+        # dropped, so the runtime can wire them straight to the process (via
+        # the main-thread queue).
+        spawn: Callable[
+            [str | None, Callable[[str], None], Callable[[int, str], None]],
+            ProcessLike,
+        ],
         tool_kinds: Callable[[str], str],  # tool name -> "read" | "scene" | "file"
         max_tool_calls: int = 40,
         notes: dict[str, str] | None = None,
@@ -69,6 +76,9 @@ class AgentSession:
         self.error = ""
 
         self._process: ProcessLike | None = None
+        # Bumped whenever a process is spawned or dropped; callbacks of an
+        # older generation are stale and ignored.
+        self._generation = 0
         # True from a spawn with --resume until the CLI proves the resume
         # worked (SessionStarted or a clean TurnFinished).
         self._resume_pending = False
@@ -106,14 +116,24 @@ class AgentSession:
         self.stop()
 
     def handle_line(self, line: str) -> None:
-        for event in parse_line(line):
-            self._handle_event(event)
+        """A stdout line of the current process."""
+        self._on_line(self._generation, line)
 
     def handle_exit(self, code: int, stderr_tail: str = "") -> None:
-        proc = self._process
-        # No process: we stopped it ourselves. Process still alive: this is
-        # the late exit of an earlier process, already replaced.
-        if proc is None or proc.alive:
+        """The current process exited."""
+        self._on_exit(self._generation, code, stderr_tail)
+
+    def _on_line(self, generation: int, line: str) -> None:
+        if generation != self._generation:
+            return
+        for event in parse_line(line):
+            if generation != self._generation:  # a previous event replaced the process
+                return
+            self._handle_event(event)
+
+    def _on_exit(self, generation: int, code: int, stderr_tail: str) -> None:
+        # Stale generation, or no process: we stopped it ourselves.
+        if generation != self._generation or self._process is None:
             return
         self._process = None
         if self.status != WORKING:
@@ -159,12 +179,19 @@ class AgentSession:
             self._drop_process()
         if self._process is None:
             resume_id = self.conversation.claude_session_id
-            self._process = self._spawn(resume_id)
+            self._generation += 1
+            generation = self._generation
+            self._process = self._spawn(
+                resume_id,
+                lambda line: self._on_line(generation, line),
+                lambda code, tail: self._on_exit(generation, code, tail),
+            )
             self._resume_pending = resume_id is not None
         return self._process
 
     def _drop_process(self) -> None:
         proc, self._process = self._process, None
+        self._generation += 1  # whatever the old process still emits is stale
         self._resume_pending = False
         if proc is not None:
             try:
