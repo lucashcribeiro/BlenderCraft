@@ -8,6 +8,7 @@ tests call ``pump()`` by hand.
 
 import queue
 import threading
+import traceback
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Callable, TypeVar
@@ -71,12 +72,12 @@ def pump(max_items: int = 100) -> int:
         except queue.Empty:
             break
         ran += 1
+        # BaseException: a KeyboardInterrupt or SystemExit from user code
+        # must not unwind into Blender's timer and stop the queue for good.
         if future is None:
             try:
                 fn()
-            except Exception:  # noqa: BLE001 - one bad post must not stop the queue
-                import traceback
-
+            except BaseException:  # noqa: BLE001 - one bad post must not stop the queue
                 traceback.print_exc()
             continue
         if not future.set_running_or_notify_cancel():
@@ -85,11 +86,18 @@ def pump(max_items: int = 100) -> int:
             future.set_result(fn())
         except Exception as exc:  # noqa: BLE001 - handed to the waiting thread
             future.set_exception(exc)
+        except BaseException as exc:  # noqa: BLE001 - as a plain error, see above
+            future.set_exception(
+                RuntimeError(f"{type(exc).__name__} on the main thread: {exc}")
+            )
     return ran
 
 
 def _tick() -> float:
-    pump()
+    try:
+        pump()
+    except BaseException:  # noqa: BLE001 - the timer must keep running
+        traceback.print_exc()
     return TIMER_INTERVAL
 
 

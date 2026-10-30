@@ -3,6 +3,7 @@ import io
 import threading
 import time
 import unittest
+from unittest import mock
 
 from blendercraft_assistant import mainthread
 
@@ -150,6 +151,46 @@ class MainThreadTest(unittest.TestCase):
             self.assertEqual(mainthread.pump(), 2)
         self.assertIn("ignored", err.getvalue())
         self.assertEqual(seen, ["after"])
+
+    def test_keyboard_interrupt_in_post_does_not_stop_pump(self):
+        seen = []
+
+        def interrupt():
+            raise KeyboardInterrupt
+
+        mainthread.post(interrupt)
+        mainthread.post(lambda: seen.append("after"))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(mainthread.pump(), 2)
+        self.assertIn("KeyboardInterrupt", err.getvalue())
+        self.assertEqual(seen, ["after"])
+
+    def test_keyboard_interrupt_in_call_becomes_an_error_for_the_caller(self):
+        out = {}
+
+        def interrupt():
+            raise KeyboardInterrupt
+
+        def worker():
+            try:
+                mainthread.run_on_main(interrupt)
+            except BaseException as exc:  # noqa: BLE001 - recording the type
+                out["exc"] = exc
+
+        t = threading.Thread(target=worker)
+        t.start()
+        _pump_until_done(t)
+        t.join(1)
+        self.assertIsInstance(out.get("exc"), RuntimeError)
+        self.assertIn("KeyboardInterrupt", str(out["exc"]))
+
+    def test_tick_survives_anything_and_keeps_the_timer(self):
+        def interrupt(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        with mock.patch.object(mainthread, "pump", interrupt), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(mainthread._tick(), mainthread.TIMER_INTERVAL)
 
 
 if __name__ == "__main__":

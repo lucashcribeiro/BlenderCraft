@@ -132,6 +132,22 @@ class RunPythonTest(unittest.TestCase):
         self.assertTrue(res.is_error)
         self.assertIn("SystemExit", res.text)
 
+    def test_keyboard_interrupt_is_an_error_result(self):
+        res = _run("raise KeyboardInterrupt")
+        self.assertTrue(res.is_error)
+        self.assertIn("KeyboardInterrupt", res.text)
+
+        def _interrupts(_args):
+            raise KeyboardInterrupt
+
+        register_tool(Tool("t_interrupts", "test", {"type": "object"}, _interrupts, "read"))
+        try:
+            res = call_tool("t_interrupts", {})
+        finally:
+            del REGISTRY["t_interrupts"]
+        self.assertTrue(res.is_error)
+        self.assertIn("KeyboardInterrupt", res.text)
+
     def test_creates_and_undo(self):
         res = call_tool(
             "run_python",
