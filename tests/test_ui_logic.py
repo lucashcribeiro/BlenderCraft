@@ -29,13 +29,63 @@ class I18nTest(unittest.TestCase):
             for key, value in table.items():
                 self.assertTrue(value.strip(), f"{lang}.{key} is empty")
 
-    def test_lang_follows_locale(self):
-        with mock.patch.object(i18n, "_locale", return_value="pt_BR"):
-            self.assertEqual(i18n.lang(), "pt")
-            self.assertEqual(i18n.t("stop"), i18n.STRINGS["pt"]["stop"])
-        for locale in ("en_US", "fr_FR", ""):
+    def test_default_is_portuguese_whatever_the_blender_locale(self):
+        # The user's Blender UI is English; the assistant is Portuguese.
+        for locale in ("en_US", "fr_FR", "pt_BR", ""):
             with mock.patch.object(i18n, "_locale", return_value=locale):
-                self.assertEqual(i18n.lang(), "en")
+                self.assertEqual(i18n.lang(), "pt")
+        self.assertEqual(i18n.t("stop"), i18n.STRINGS["pt"]["stop"])
+
+    def test_preference_chooses_the_language(self):
+        with mock.patch.object(i18n, "_setting", return_value="EN"), \
+                mock.patch.object(i18n, "_locale", return_value="pt_BR"):
+            self.assertEqual(i18n.lang(), "en")
+            self.assertEqual(i18n.t("stop"), i18n.STRINGS["en"]["stop"])
+        with mock.patch.object(i18n, "_setting", return_value="PT"), \
+                mock.patch.object(i18n, "_locale", return_value="en_US"):
+            self.assertEqual(i18n.lang(), "pt")
+
+    def test_follow_blender_uses_the_interface_locale(self):
+        with mock.patch.object(i18n, "_setting", return_value="AUTO"):
+            with mock.patch.object(i18n, "_locale", return_value="pt_BR"):
+                self.assertEqual(i18n.lang(), "pt")
+            for locale in ("en_US", "fr_FR", ""):
+                with mock.patch.object(i18n, "_locale", return_value=locale):
+                    self.assertEqual(i18n.lang(), "en")
+
+    def test_setting_falls_back_to_portuguese_when_unreadable(self):
+        # No preferences of this add-on in a plain -b run.
+        self.assertEqual(i18n._setting(), "PT")
+
+        class _Prefs:
+            ui_language = "garbage"
+
+        class _Addon:
+            preferences = _Prefs()
+
+        class _Addons:
+            @staticmethod
+            def get(_name):
+                return _Addon()
+
+        class _Ctx:
+            preferences = type("P", (), {"addons": _Addons()})()
+
+        with mock.patch.object(bpy, "context", _Ctx()):
+            self.assertEqual(i18n._setting(), "PT")
+            _Prefs.ui_language = "EN"
+            self.assertEqual(i18n._setting(), "EN")
+            _Prefs.ui_language = "AUTO"
+            self.assertEqual(i18n._setting(), "AUTO")
+
+    def test_preference_is_declared_with_portuguese_default(self):
+        from blendercraft_assistant.ui import prefs
+
+        keywords = prefs.BC_AddonPreferences.__annotations__["ui_language"].keywords
+        self.assertEqual(keywords["default"], "PT")
+        self.assertEqual([item[0] for item in keywords["items"]], ["PT", "EN", "AUTO"])
+        self.assertEqual(keywords["items"][0][1], "Português")
+        self.assertIn("Idioma do BlenderCraft", keywords["name"])
 
     def test_t_formats_only_when_asked(self):
         with mock.patch.object(i18n, "_locale", return_value="en_US"):

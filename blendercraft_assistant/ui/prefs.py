@@ -9,16 +9,38 @@ import bpy
 from bpy.props import EnumProperty, IntProperty, StringProperty
 from bpy.types import AddonPreferences
 
-from ..i18n import t
+from ..i18n import LANGUAGE_DEFAULT, LANGUAGE_PREF, t
 
 # The add-on's package: blendercraft_assistant in tests,
 # bl_ext.<repository>.blendercraft_assistant when installed.
 ADDON_ID = __package__.rpartition(".")[0]
 
 
+def _language_changed() -> None:
+    from .. import runtime
+
+    runtime.tag_redraw()
+
+
 class BC_AddonPreferences(AddonPreferences):
     bl_idname = ADDON_ID
 
+    ui_language: EnumProperty(
+        name="Idioma do BlenderCraft / BlenderCraft language",
+        description=(
+            "Idioma do painel, dos menus e das mensagens. Nomes de menus e "
+            "operadores só mudam depois de reiniciar o Blender / Language of "
+            "the panel, menus and messages. Menu and operator names change "
+            "after restarting Blender"
+        ),
+        items=(
+            ("PT", "Português", ""),
+            ("EN", "English", ""),
+            ("AUTO", "Seguir o Blender / Follow Blender", ""),
+        ),
+        default=LANGUAGE_DEFAULT,
+        update=lambda self, context: _language_changed(),
+    )
     claude_path: StringProperty(
         name=t("claude_path"),
         description=t("claude_path_desc"),
@@ -59,6 +81,7 @@ class BC_AddonPreferences(AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
+        layout.prop(self, LANGUAGE_PREF)
         layout.prop(self, "claude_path")
         layout.prop(self, "external_port")
         layout.operator("bc.copy_mcp_command", text=t("copy_mcp"), icon="COPYDOWN")

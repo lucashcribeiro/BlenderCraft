@@ -28,10 +28,11 @@ class Gen3dPanelTest(unittest.TestCase):
     def test_settings_hint_without_key(self):
         with mock.patch.object(gen3d_tool, "has_any_key", return_value=False):
             log = self.draw(self.panel.VIEW3D_PT_bc_settings)
-        self.assertTrue(any(i18n.t("gen3d_key_hint")[:30] in label for label in self.labels(log)))
+        hint = i18n.t("gen3d_key_hint")[:20]
+        self.assertIn(hint, " ".join(self.labels(log)))
         with mock.patch.object(gen3d_tool, "has_any_key", return_value=True):
             log = self.draw(self.panel.VIEW3D_PT_bc_settings)
-        self.assertFalse(any(i18n.t("gen3d_key_hint")[:30] in label for label in self.labels(log)))
+        self.assertNotIn(hint, " ".join(self.labels(log)))
 
     def test_running_job_line_and_cancel(self):
         log = self.draw(self.panel.VIEW3D_PT_bc_assistant)

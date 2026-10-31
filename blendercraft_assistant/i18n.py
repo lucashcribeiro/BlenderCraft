@@ -1,7 +1,9 @@
 """Panel texts in Portuguese and English.
 
-Portuguese when Blender's interface locale starts with "pt", English
-otherwise. Values may hold str.format fields; t() fills them only when
+The extension preference "BlenderCraft language" decides: Portuguese (the
+default, also when preferences are unavailable), English, or follow Blender
+(Portuguese when its interface locale starts with "pt", English otherwise).
+Values may hold str.format fields; t() fills them only when
 arguments are given, so a template like "queue_dropped" can be handed on
 to code that formats it later.
 """
@@ -339,8 +341,30 @@ def _locale() -> str:
     return bpy.app.translations.locale or ""
 
 
+LANGUAGE_PREF = "ui_language"  # property of the extension preferences
+LANGUAGE_DEFAULT = "PT"  # PT | EN | AUTO (follow Blender)
+
+
+def _setting() -> str:
+    """The language preference's value; the default when it can't be read
+    (add-on not enabled, restricted context while registering, no bpy)."""
+    try:
+        import bpy
+
+        addon = bpy.context.preferences.addons.get(__package__)
+        value = getattr(addon.preferences, LANGUAGE_PREF)
+    except Exception:  # noqa: BLE001 - any failure means "use the default"
+        return LANGUAGE_DEFAULT
+    return value if value in ("PT", "EN", "AUTO") else LANGUAGE_DEFAULT
+
+
 def lang() -> str:
-    return "pt" if _locale().startswith("pt") else "en"
+    setting = _setting()
+    if setting == "EN":
+        return "en"
+    if setting == "AUTO":
+        return "pt" if _locale().startswith("pt") else "en"
+    return "pt"
 
 
 def t(key: str, **fmt) -> str:
