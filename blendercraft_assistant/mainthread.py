@@ -17,6 +17,10 @@ T = TypeVar("T")
 
 TIMER_INTERVAL = 0.05
 
+# Callables run on every timer tick (the runtime redraws the elapsed time of
+# a working agent). A failing hook is reported and kept.
+tick_hooks: list[Callable[[], None]] = []
+
 _queue: "queue.SimpleQueue[tuple[Callable[[], object], Future | None]]" = (
     queue.SimpleQueue()
 )
@@ -101,6 +105,11 @@ def _tick() -> float:
             viewport.flush_if_dirty()  # after a batch that ran tool calls
     except BaseException:  # noqa: BLE001 - the timer must keep running
         traceback.print_exc()
+    for hook in list(tick_hooks):
+        try:
+            hook()
+        except Exception:  # noqa: BLE001 - the timer must keep running
+            traceback.print_exc()
     return TIMER_INTERVAL
 
 

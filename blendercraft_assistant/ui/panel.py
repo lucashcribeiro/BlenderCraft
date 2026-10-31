@@ -11,7 +11,7 @@ import json
 import bpy
 from bpy.types import Panel
 
-from .. import runtime
+from .. import activity, runtime
 from ..gen3d import jobs as gen3d_jobs
 from ..tools import gen3d as gen3d_tool
 from ..i18n import t
@@ -98,13 +98,20 @@ def _draw_generations(layout, context) -> None:
         row.operator("bc.gen3d_cancel", text="", icon="CANCEL")
 
 
-def _draw_header(layout, status: str) -> None:
+def _status_text(status: str, session) -> str:
+    """Badge text: while working, what the agent is doing and for how long."""
+    if status == "WORKING" and session is not None:
+        return activity.working_text(session)
+    return t(_STATUS.get(status, _STATUS["IDLE"])[0])
+
+
+def _draw_header(layout, status: str, session=None) -> None:
     """Status badge on the left, chat buttons on the right."""
     row = layout.row(align=True)
     badge = row.row(align=True)
     badge.alert = status == "ERROR"
-    key, icon = _STATUS.get(status, _STATUS["IDLE"])
-    badge.label(text=t(key), icon=icon)
+    icon = _STATUS.get(status, _STATUS["IDLE"])[1]
+    badge.label(text=_status_text(status, session), icon=icon)
     buttons = row.row(align=True)
     buttons.alignment = "RIGHT"
     buttons.emboss = "NONE"
@@ -234,7 +241,7 @@ class VIEW3D_PT_bc_assistant(Panel):
 
         _draw_approval(layout, context)
         _draw_claude_problem(layout, context)
-        _draw_header(layout, status)
+        _draw_header(layout, status, session)
         _draw_generations(layout, context)
 
         row = layout.row(align=True)

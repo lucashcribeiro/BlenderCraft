@@ -70,6 +70,21 @@ _stoppers: list[threading.Thread] = []
 
 # ---- lifecycle -------------------------------------------------------
 
+_last_working_redraw = 0.0
+
+
+def _working_tick() -> None:
+    """Timer hook: redraw about once a second while the agent works, so the
+    header's elapsed seconds keep counting."""
+    global _last_working_redraw
+    if session is None or session.status != "WORKING":
+        return
+    now = time.monotonic()
+    if now - _last_working_redraw >= 1.0:
+        _last_working_redraw = now
+        tag_redraw()
+
+
 
 def start() -> None:
     """Start the MCP server, the main-thread timer and the handlers."""
@@ -83,6 +98,8 @@ def start() -> None:
         if store is None:
             store = ConversationStore()
         mainthread.install_timer()
+        if _working_tick not in mainthread.tick_hooks:
+            mainthread.tick_hooks.append(_working_tick)
         _add_handlers()
         handler = McpHandler(
             _list_tools, _call, _approve, approval_enabled=lambda: mode == "ASK"
@@ -125,6 +142,8 @@ def stop() -> None:
         srv.stop()
     token = ""
     mainthread.uninstall_timer()
+    while _working_tick in mainthread.tick_hooks:
+        mainthread.tick_hooks.remove(_working_tick)
     _remove_handlers()
     _join_stoppers(STOP_JOIN_TIMEOUT)
 

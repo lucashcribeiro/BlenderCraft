@@ -44,9 +44,10 @@ class FlattenTest(unittest.TestCase):
         self.assertEqual(rows[4][1], "Pronto")
         self.assertEqual([r[1] for r in rows if r[0] == "TEXT"], ["Criei o cubo."])
         tool = rows[6]
-        self.assertEqual(tool[1], "run_python: cubo")
+        self.assertEqual(tool[1], "Executando Python — cubo")
         self.assertEqual((tool[2], tool[3]), ("tu1", "ok"))
         self.assertEqual(rows[7][3], "running")
+        self.assertEqual(rows[7][1], "Tirando print (iso)")  # no description: label only
 
     def test_long_text_is_wrapped_to_width(self):
         long = "palavra " * 60

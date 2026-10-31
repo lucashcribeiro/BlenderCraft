@@ -743,7 +743,7 @@ class PanelDrawTest(unittest.TestCase):
         self.assertIn("bc.stop", ops)
         self.assertIn("bc.send_now", ops)
         self.assertIn(i18n.t("queued", n=1), self.labels(log))
-        self.assertIn(i18n.t("working"), self.labels(log))
+        self.assertIn("Trabalhando: Pensando… 0 s", self.labels(log))
 
     def test_tool_details_expand(self):
         collapsed = self.labels(self.draw(self.panel.VIEW3D_PT_bc_assistant))

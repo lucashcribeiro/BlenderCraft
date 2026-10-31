@@ -15,14 +15,14 @@ import json
 
 from bpy.types import UIList
 
-from .. import runtime
+from .. import activity, runtime
 from ..i18n import lang, t
 from . import markdown
 from .text_wrap import CHAR_PX, wrap
 
 MESSAGES_PER_PAGE = 40  # messages per "show older" page
 DETAIL_CHARS = 600  # tool input/output shown under Details
-SUMMARY_CHARS = 40
+SUMMARY_CHARS = 60
 LIST_MARGIN_PX = 70  # panel padding, row padding and the list scrollbar
 ROW_PX = 20  # height of a list row at ui_scale 1
 RESERVED_ROWS = 14  # header, model, footer, input card and subpanels
@@ -41,6 +41,20 @@ TOOL_ICONS = {
 
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[:limit]}…"
+
+
+def tool_row_text(tool) -> str:
+    """Row text of a call: a friendly label, then the model's description
+    ("Executando Python — Corta o furo da perna"). A tool without a label
+    keeps its raw name and shows its first argument if it has no description."""
+    data = tool.input if isinstance(tool.input, dict) else {}
+    description = data.get("description")
+    description = " ".join(description.split()) if isinstance(description, str) else ""
+    if not activity.knows(tool.name):
+        summary = tool_summary(tool)
+        return f"{tool.name}: {summary}" if summary else tool.name
+    label = activity.tool_label(tool.name, data)
+    return f"{label} — {_clip(description, SUMMARY_CHARS)}" if description else label
 
 
 def tool_summary(tool) -> str:
@@ -110,9 +124,7 @@ def flatten(messages, error: str, expanded_tool: str, width_px: int, scale: floa
         rows.append(("USER_HEAD", t("you"), "", "") if user else ("CLAUDE_HEAD", t("claude"), "", ""))
         rows += _text_rows(message.text, user, text_width, scale)
         for tool in message.tools:
-            summary = tool_summary(tool)
-            label = f"{tool.name}: {summary}" if summary else tool.name
-            rows.append(("TOOL", label, tool.id, tool.status))
+            rows.append(("TOOL", tool_row_text(tool), tool.id, tool.status))
             if tool.id == expanded_tool:
                 details = "→ " + _clip(json.dumps(tool.input, ensure_ascii=False, indent=1), DETAIL_CHARS)
                 if tool.output:
@@ -273,7 +285,7 @@ class BC_UL_chat(UIList):
             # The active row (highlighted): it says when the agent works.
             session = runtime.session
             if session is not None and session.status == "WORKING":
-                layout.label(text=t("working"), icon="TIME")
+                layout.label(text=activity.working_text(session), icon="TIME")
             else:
                 layout.label(text="")
         else:  # GAP

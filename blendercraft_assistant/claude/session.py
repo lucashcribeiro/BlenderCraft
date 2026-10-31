@@ -105,6 +105,8 @@ class AgentSession:
         # Successful "scene" tool calls in this conversation, undo/redo aside.
         self.changes = 0
         self.error = ""
+        # time.monotonic() when the current request began (None while idle).
+        self.turn_started: float | None = None
 
         self._process: ProcessLike | None = None
         # Bumped whenever a process is spawned or dropped; callbacks of an
@@ -200,6 +202,7 @@ class AgentSession:
         sent = f"{context}\n{text}" if context else text
         self._pending = (sent, attachments)
         self.status = WORKING
+        self.turn_started = time.monotonic()
         if self._deliver([{"type": "text", "text": sent}, *attachments]):
             self._save()
 

@@ -59,7 +59,8 @@ modifier only when the next step needs real geometry (export, boolean on \
 the result, weld).
 - Make the model with run_python, one logical step per call (one primitive, \
 one boolean, one bevel), each with a short `description` (it names the undo \
-step). Name every object clearly. Never hide a failure: if a call errors, \
+step and the user sees it while you work, so write it in the user's \
+language). Name every object clearly. Never hide a failure: if a call errors, \
 read the message and fix the cause.
 - Verify visually. After any visible change, take `screenshot` from at \
 least two angles (for example iso plus front, or top for layouts) and \
@@ -70,6 +71,9 @@ Do not say a model is done before you have looked at it.
 component, manifold, not inverted) and print_check (walls, overhangs, \
 below_bed_mm) and report the numbers.
 - Use `undo` to back out of your own mistakes instead of stacking repairs.
+- The user watches the panel while you work. Before a long step (a heavy \
+boolean, an import, several calls in a row) send a one-line progress note \
+in the user's language saying what you are about to do.
 - Tool calls are limited per request ({max_tool_calls}). Plan to finish within that; if \
 you hit the limit, stop and say where you are.
 

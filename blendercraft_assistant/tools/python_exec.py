@@ -191,7 +191,10 @@ register_tool(
                 "code": {"type": "string"},
                 "description": {
                     "type": "string",
-                    "description": "Short label for the undo step.",
+                    "description": (
+                        "Short label for the undo step, shown to the user while "
+                        "you work: write it in the user's language."
+                    ),
                 },
             },
             "required": ["code", "description"],
