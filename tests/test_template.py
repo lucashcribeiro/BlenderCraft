@@ -20,10 +20,15 @@ TEMPLATE_PATH = ROOT / "app_template" / "blendercraft" / "__init__.py"
 EXT_UNITS = "bl_ext.user_default.blendercraft_assistant.units"
 
 
+_SETTINGS_DIR = Path(tempfile.mkdtemp(prefix="bc_settings_"))
+
+
 def load_template():
     spec = importlib.util.spec_from_file_location("blendercraft_template_under_test", TEMPLATE_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    # Never read or write the user's real settings.
+    module.SETTINGS_PATH = _SETTINGS_DIR / "missing" / "settings.json"
     return module
 
 
@@ -456,6 +461,7 @@ class TweakUiGuiBranchTest(unittest.TestCase):
         self.rec = _Recorder()
         self.category = "Assistente"
         self.ui_scale = 1.0
+        self.style = "SOLIDCRAFT"
 
     def run_tweak(self, windows, unsaved=True, tab=False):
         self.rec.windows = windows
@@ -471,6 +477,8 @@ class TweakUiGuiBranchTest(unittest.TestCase):
             self.template, "_ui_scale", side_effect=lambda: self.ui_scale
         ), mock.patch.object(
             self.template, "_schedule_tab", side_effect=lambda: self.rec.sets.append(("tab", None, 0))
+        ), mock.patch.object(
+            self.template, "layout_style", side_effect=lambda: self.style
         ):
             if tab:
                 return self.template._select_assistant_tab()
@@ -537,6 +545,23 @@ class TweakUiGuiBranchTest(unittest.TestCase):
         object.__setattr__(self.ui_region(view), "is_property_readonly", lambda name: True)
         self.template._tab_attempts = self.template.MAX_TAB_ATTEMPTS - 1
         self.assertIsNone(self.run_tweak([_stub_window("Layout", areas)], tab=True))
+
+    def test_classic_layout_keeps_blender_proportions(self):
+        self.style = "CLASSIC"
+        view, areas = _factory_layout(self.rec)
+        properties, outliner, _, _ = areas
+        window = _stub_window("Layout", areas)
+        self.assertIsNone(self.run_tweak([window]))
+        # Only the timeline goes; the right column stays as it was.
+        self.assertEqual(window.screen.areas, [properties, outliner, view])
+        self.assertEqual(self.rec.closes, [1])
+        self.assertEqual(self.rec.splits, [])
+        self.assertEqual([n for n, _, _ in self.rec.sets if n == "ui_type"], [])
+        # The chat still opens in the sidebar, on the Assistant tab.
+        self.assertTrue(view.spaces[0].show_region_ui)
+        self.assertTrue(self.tab_scheduled())
+        self.run_tweak([window], tab=True)
+        self.assertEqual(self.ui_region(view).active_panel_category, "Assistente")
 
     def test_left_column_scales_with_the_interface(self):
         _, areas = _factory_layout(self.rec)
@@ -954,3 +979,69 @@ class OpenFilesTest(unittest.TestCase):
         for lang in ("pt", "en"):
             for key in ("open_failed", "no_extension"):
                 self.assertIn("{name}", self.template.MESSAGES[lang][key])
+
+
+class LayoutStyleTest(unittest.TestCase):
+    """The layout choice, kept in BlenderCraft's settings.json."""
+
+    def setUp(self):
+        self.template = load_template()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.template.SETTINGS_PATH = self.tmp / "BlenderCraft" / "settings.json"
+
+    def tearDown(self):
+        self.template.unregister()
+
+    def write(self, text):
+        path = self.template.SETTINGS_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def test_solidcraft_is_the_default(self):
+        self.assertEqual(self.template.DEFAULT_LAYOUT, "SOLIDCRAFT")
+        self.assertEqual(self.template.layout_style(), "SOLIDCRAFT")
+
+    def test_reads_the_setting(self):
+        self.write('{"layout_style": "classic"}')
+        self.assertEqual(self.template.layout_style(), "CLASSIC")
+
+    def test_bad_settings_fall_back_to_solidcraft(self):
+        for text in ("not json", '{"layout_style": "other"}', "[1, 2]", '{"layout_style": 3}'):
+            self.write(text)
+            self.assertEqual(self.template.layout_style(), "SOLIDCRAFT", text)
+
+    def test_saving_keeps_other_settings(self):
+        self.write('{"other": 1}')
+        self.template.set_layout_style("CLASSIC")
+        import json as _json
+
+        data = _json.loads(self.template.SETTINGS_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(data, {"other": 1, "layout_style": "classic"})
+        self.assertEqual(self.template.layout_style(), "CLASSIC")
+        self.assertEqual([p.name for p in self.template.SETTINGS_PATH.parent.iterdir()], ["settings.json"])
+
+    def test_saving_creates_the_folder(self):
+        self.template.set_layout_style("CLASSIC")
+        self.assertEqual(self.template.layout_style(), "CLASSIC")
+        self.assertTrue(self.template.SETTINGS_PATH.is_file())
+
+    def test_unknown_style_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.template.set_layout_style("FANCY")
+
+    def test_window_menu_offers_both_styles(self):
+        with mock.patch("addon_utils.enable"):
+            self.template.register()
+        self.assertTrue(hasattr(bpy.types, "BLENDERCRAFT_MT_layout"))
+        with _quiet_reports():
+            result = bpy.ops.blendercraft.layout_style(style="CLASSIC")
+        self.assertEqual(result, {"FINISHED"})
+        self.assertEqual(self.template.layout_style(), "CLASSIC")
+        self.template.unregister()
+        self.assertFalse(hasattr(bpy.types, "BLENDERCRAFT_MT_layout"))
+
+    def test_style_labels_in_both_languages(self):
+        for lang in ("pt", "en"):
+            for key in ("layout_menu", "layout_classic", "layout_solidcraft", "layout_saved"):
+                self.assertTrue(self.template.MESSAGES[lang][key])

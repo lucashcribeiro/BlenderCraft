@@ -14,7 +14,10 @@ loads in background mode without the extension installed.
 
 import importlib
 import json
+import os
 import sys
+import tempfile
+from pathlib import Path
 
 import bpy
 from bpy.app.handlers import persistent
@@ -30,6 +33,13 @@ MAX_CLOSES = 8
 # The default view distance (10 BU) is a 10 mm window; 80 mm frames the 20 mm cube.
 VIEW_DISTANCE = 80.0
 _attempts = 0
+
+# Layout of new files: SolidCraft-like (default) or Blender's own. The choice
+# lives in BlenderCraft's settings.json, next to the conversations: the
+# template cannot own add-on preferences.
+SETTINGS_PATH = Path.home() / "Library" / "Application Support" / "BlenderCraft" / "settings.json"
+LAYOUT_STYLES = ("SOLIDCRAFT", "CLASSIC")
+DEFAULT_LAYOUT = "SOLIDCRAFT"
 
 # SolidCraft-like layout: Browser over Properties on the left, 60/40.
 LEFT_COLUMN_WIDTH = 320  # pixels at ui_scale 1
@@ -234,6 +244,94 @@ def _set_editor(window, screen, area, ui_type: str) -> None:
         area.ui_type = ui_type
 
 
+def _read_settings() -> dict:
+    try:
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def layout_style() -> str:
+    """SOLIDCRAFT (the default) or CLASSIC (Blender's own Layout proportions)."""
+    value = _read_settings().get("layout_style")
+    style = value.upper() if isinstance(value, str) else ""
+    return style if style in LAYOUT_STYLES else DEFAULT_LAYOUT
+
+
+def set_layout_style(style: str) -> None:
+    """Save the layout for new files, keeping the other settings."""
+    if style not in LAYOUT_STYLES:
+        raise ValueError(f"Unknown layout style: {style!r}")
+    data = _read_settings()
+    data["layout_style"] = style.lower()
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=SETTINGS_PATH.parent, prefix=".settings.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=1)
+        os.replace(tmp, SETTINGS_PATH)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+class BLENDERCRAFT_OT_layout_style(bpy.types.Operator):
+    """Choose the layout of new BlenderCraft files"""
+
+    bl_idname = "blendercraft.layout_style"
+    bl_label = "BlenderCraft Layout"
+    bl_options = {"INTERNAL"}
+
+    style: bpy.props.EnumProperty(
+        items=[("SOLIDCRAFT", "SolidCraft", ""), ("CLASSIC", "Classic Blender", "")],
+        default=DEFAULT_LAYOUT,
+    )
+
+    def execute(self, _context):
+        set_layout_style(self.style)
+        self.report({"INFO"}, _message("layout_saved"))
+        return {"FINISHED"}
+
+
+class BLENDERCRAFT_MT_layout(bpy.types.Menu):
+    bl_idname = "BLENDERCRAFT_MT_layout"
+    bl_label = "BlenderCraft Layout"  # translated in _register_ui()
+
+    def draw(self, _context):
+        current = layout_style()
+        for style, key in (("SOLIDCRAFT", "layout_solidcraft"), ("CLASSIC", "layout_classic")):
+            icon = "RADIOBUT_ON" if style == current else "RADIOBUT_OFF"
+            op = self.layout.operator(BLENDERCRAFT_OT_layout_style.bl_idname, text=_message(key), icon=icon)
+            op.style = style
+
+
+def _draw_window_menu(self, _context) -> None:
+    self.layout.separator()
+    self.layout.menu(BLENDERCRAFT_MT_layout.bl_idname)
+
+
+UI_CLASSES = (BLENDERCRAFT_OT_layout_style, BLENDERCRAFT_MT_layout)
+
+
+def _register_ui() -> None:
+    BLENDERCRAFT_MT_layout.bl_label = _message("layout_menu")
+    for cls in UI_CLASSES:
+        if not getattr(cls, "is_registered", False):
+            bpy.utils.register_class(cls)
+    menu = bpy.types.TOPBAR_MT_window
+    menu.remove(_draw_window_menu)
+    menu.append(_draw_window_menu)
+
+
+def _unregister_ui() -> None:
+    bpy.types.TOPBAR_MT_window.remove(_draw_window_menu)
+    for cls in reversed(UI_CLASSES):
+        if getattr(cls, "is_registered", False):
+            bpy.utils.unregister_class(cls)
+
+
 def _move_side_column_left(window, screen) -> None:
     """SolidCraft-like: the Browser (Outliner) over Properties on the left,
     and the 3D View reaching the right edge of the window."""
@@ -292,7 +390,8 @@ def _tweak_ui():
     for window in layouts:
         screen = window.screen
         _close_timelines(window, screen)
-        _move_side_column_left(window, screen)
+        if layout_style() == "SOLIDCRAFT":
+            _move_side_column_left(window, screen)
         _open_sidebar(window, screen)
     if layouts and category is not None:
         _schedule_tab()
@@ -402,10 +501,18 @@ _argv_read = False
 
 MESSAGES = {
     "pt": {
+        "layout_menu": "Layout do BlenderCraft",
+        "layout_classic": "Blender clássico",
+        "layout_solidcraft": "SolidCraft",
+        "layout_saved": "Layout salvo: vale para os arquivos novos (File › New)",
         "open_failed": "Não foi possível abrir {name}",
         "no_extension": "Não foi possível abrir {name}: a extensão BlenderCraft Assistant não está habilitada",
     },
     "en": {
+        "layout_menu": "BlenderCraft Layout",
+        "layout_classic": "Classic Blender",
+        "layout_solidcraft": "SolidCraft",
+        "layout_saved": "Layout saved: it applies to new files (File › New)",
         "open_failed": "Could not open {name}",
         "no_extension": "Could not open {name}: the BlenderCraft Assistant extension is not enabled",
     },
@@ -614,6 +721,7 @@ def _restore_splash():
 
 
 def register() -> None:
+    _register_ui()
     _hide_splash()
     _schedule_enable()
     _queue_open_args()
@@ -637,3 +745,4 @@ def unregister() -> None:
         if bpy.app.timers.is_registered(timer):
             bpy.app.timers.unregister(timer)
     _restore_splash()
+    _unregister_ui()
