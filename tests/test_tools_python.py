@@ -1,4 +1,5 @@
 import contextlib
+import ctypes
 import os
 import sys
 import tempfile
@@ -269,14 +270,22 @@ class AiUndoTrackingTest(unittest.TestCase):
 
 @contextlib.contextmanager
 def _quiet_fd_stdout():
-    """Silence Blender's C-level "Info: Saved ..." lines (test output only)."""
+    """Silence Blender's C-level "Info: Saved ..." lines (test output only).
+
+    C stdio is buffered when output is a pipe: flush it while the descriptor
+    still points at /dev/null, or the lines show up under later tests.
+    """
+    libc = ctypes.CDLL(None)
     sys.stdout.flush()
+    libc.fflush(None)
     saved = os.dup(1)
     devnull = os.open(os.devnull, os.O_WRONLY)
     try:
         os.dup2(devnull, 1)
         yield
     finally:
+        sys.stdout.flush()
+        libc.fflush(None)
         os.dup2(saved, 1)
         os.close(saved)
         os.close(devnull)

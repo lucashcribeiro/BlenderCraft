@@ -864,7 +864,8 @@ class SessionNotesTest(SessionTestBase):
 
     def test_save_error_uses_note(self):
         session = self.make(notes=self.NOTES)
-        with mock.patch.object(self.store, "save", side_effect=OSError("disco cheio")):
+        with mock.patch.object(self.store, "save", side_effect=OSError("disco cheio")), \
+                self.assertLogs("blendercraft_assistant.claude.session", level="WARNING"):
             session.send("x")
         self.assertEqual(session.error, "SEM GRAVAR: disco cheio")
 
