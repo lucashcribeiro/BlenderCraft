@@ -4,7 +4,7 @@ BlenderCraft é o Blender 5.2 com um painel de assistente na lateral da viewport
 
 O projeto tem duas partes:
 
-- **Template de aplicação `blendercraft`** (`app_template/`): abre o Blender sem a workspace Animation e sem a timeline, com o painel Assistente visível, unidades em milímetros (1 unidade do Blender = 1 mm) e 256 passos de desfazer. O resto do Blender fica como sempre foi. Arquivos `.blend` que já têm nome abrem com as workspaces e unidades deles.
+- **Template de aplicação `blendercraft`** (`app_template/`): abre o Blender sem a tela de splash, sem a workspace Animation e sem a timeline, num layout parecido com o do SolidCraft (veja [Layout](#layout)), com o painel Assistente aberto, unidades em milímetros (1 unidade do Blender = 1 mm) e 256 passos de desfazer. O resto do Blender fica como sempre foi. Arquivos `.blend` que já têm nome abrem com as workspaces, o layout e as unidades deles.
 - **Extensão `blendercraft_assistant`** (`blendercraft_assistant/`): o painel, o servidor MCP local e a ponte com o Claude Code.
 
 ## Requisitos
@@ -26,13 +26,49 @@ O script copia o template para a pasta de configuração do Blender (`~/Library/
 
 Rode de novo depois de atualizar o projeto, para copiar a versão nova.
 
+## Instalar o app BlenderCraft
+
+```sh
+scripts/install.sh --app
+```
+
+Além do template e da extensão, cria o **BlenderCraft.app** em `~/Applications` (a pasta é criada se não existir) e o registra no Finder. Depois disso o BlenderCraft aparece no Launchpad e no Spotlight, com o ícone próprio. Dá para combinar com `--dev` (`scripts/install.sh --dev --app`).
+
+Para só gerar o app, sem instalar: `scripts/build_app.sh` cria `dist/BlenderCraft.app`. O ícone vem de `scripts/assets/BlenderCraft.png`, que é desenhado por `scripts/make_icon.py` (rode de novo com o Blender para regenerar, o comando está no topo do arquivo).
+
+O app só abre o Blender que está em `/Applications/Blender.app` com o template `blendercraft`; ele não traz uma cópia do Blender.
+
 ## Abrir
+
+Pelo app: dois cliques no **BlenderCraft** (Launchpad, Spotlight ou `~/Applications`).
+
+Pelo terminal:
 
 ```sh
 scripts/BlenderCraft.command
 ```
 
-Também dá para dar dois cliques no arquivo pelo Finder. Ele abre o Blender com `--app-template blendercraft`. A extensão é habilitada pelo próprio template, e a aba **Assistente** aparece na barra lateral (tecla N) da 3D View.
+A extensão é habilitada pelo próprio template, e a aba **Assistente** já abre na barra lateral (tecla N) da 3D View.
+
+### Abrir arquivos STL e 3MF
+
+- **No Finder**: clique com o botão direito no arquivo `.stl` ou `.3mf`, **Abrir com › BlenderCraft**. O BlenderCraft não vira o app padrão desses arquivos (nem dos `.blend`); ele só aparece na lista do **Abrir com**. Para torná-lo padrão, use **Obter Informações › Abrir com › Alterar Tudo** no Finder.
+- **Arrastando** arquivos para o ícone do BlenderCraft no Dock ou no Finder.
+- **Pelo terminal**: `scripts/BlenderCraft.command peca.stl --open suporte.3mf` (o `--open` é opcional).
+
+O BlenderCraft abre um arquivo novo, importa cada arquivo em milímetros (o 3MF usa a unidade declarada no arquivo), tira o cubo inicial se ele não foi mexido e enquadra os objetos importados na 3D View. Se algum arquivo não abrir, aparece um aviso com o motivo. Um `.blend` aberto do mesmo jeito abre como arquivo do Blender, com o template ativo.
+
+Com o BlenderCraft já aberto, dá para arrastar arquivos `.3mf` para dentro da 3D View, e o menu **File** tem importar e exportar 3MF.
+
+### Layout
+
+Arquivos novos abrem no layout **SolidCraft**: à esquerda, o **Browser** (o Outliner, com os olhos para mostrar e esconder objetos) em cima e as Propriedades embaixo; no meio, a 3D View indo até a borda direita da janela; e o chat do Assistente na barra lateral, flutuando sobre a viewport. Não há timeline.
+
+Quem prefere o Blender de sempre escolhe em **Window › Layout do BlenderCraft › Blender clássico**: Outliner e Propriedades na coluna da direita, nos tamanhos padrão do Blender, com o Assistente na barra lateral. A escolha vale para os próximos arquivos novos (**File › New**) e fica salva em `~/Library/Application Support/BlenderCraft/settings.json`. Arquivos `.blend` com nome sempre abrem com o layout que foi salvo neles.
+
+A largura da barra lateral não pode ser definida por script no Blender 5.2; ela abre na largura padrão e dá para arrastar a borda dela para alargar o chat.
+
+O BlenderCraft não mostra a tela de splash ao abrir. Isso não muda a preferência do Blender comum, que continua mostrando a splash.
 
 ## Modo de desenvolvimento
 
