@@ -87,6 +87,40 @@ STRINGS: dict[str, dict[str, str]] = {
         "claude_path_desc": "Vazio: procura claude no PATH e nos locais de instalação comuns",
         "external_port": "Porta do servidor MCP (0 = aleatória)",
         "external_port_desc": "Porta fixa para usar o servidor de fora; vale ao religar a extensão",
+        "gen3d_title": "Geração 3D por IA",
+        "meshy_key": "Chave da API do Meshy",
+        "meshy_key_desc": "Chave da API do Meshy (meshy.ai, plano pago). Vazio: usa a variável de ambiente MESHY_API_KEY",
+        "tripo_key": "Chave da API do Tripo",
+        "tripo_key_desc": "Chave da API do Tripo (tsk_…). Vazio: usa a variável de ambiente TRIPO_API_KEY",
+        "gen3d_provider": "Serviço padrão",
+        "gen3d_provider_desc": "Serviço usado por generate_3d_model quando o Claude não escolhe um",
+        "tripo_region": "Site do Tripo",
+        "tripo_region_desc": "Onde a chave do Tripo foi criada: a chave só vale no site dela",
+        "tripo_region_ai": "Internacional (tripo3d.ai)",
+        "tripo_region_com": "China (tripo3d.com)",
+        "gen3d_keys_note": "As chaves ficam nas preferências do Blender, nunca no .blend, e não são enviadas ao Claude.",
+        "gen3d_offline": (
+            "A geração 3D por IA precisa de internet e o acesso online do Blender está "
+            "desligado. Ligue em Preferências › Sistema › Rede › Permitir acesso online "
+            "(Allow Online Access) e tente de novo."
+        ),
+        "gen3d_no_key": (
+            "Falta a chave da API do {provider}. Cole a chave em Preferências › "
+            "Extensões › BlenderCraft Assistant › Geração 3D por IA (ou defina a "
+            "variável de ambiente {env}) e tente de novo."
+        ),
+        "gen3d_bad_key": (
+            "O {provider} recusou a chave da API. Confira a chave em Preferências › "
+            "Extensões › BlenderCraft Assistant (no Tripo, confira também o site da chave)."
+        ),
+        "gen3d_no_credits": (
+            "O {provider} recusou por falta de créditos ou de plano: a API exige um "
+            "plano pago com créditos disponíveis."
+        ),
+        "gen3d_rate_limit": "O {provider} está limitando os pedidos; espere um pouco e tente de novo.",
+        "gen3d_key_hint": "Geração 3D por IA: sem chave. Configure em Preferências › Extensões › BlenderCraft Assistant.",
+        "gen3d_running": "Gerando modelo 3D ({provider}): {stage} {percent}",
+        "gen3d_cancel": "Cancelar geração",
         "menu_3mf": "3D Manufacturing Format (.3mf)",
         "import_3mf": "Importar 3MF",
         "export_3mf": "Exportar 3MF",
@@ -212,6 +246,39 @@ STRINGS: dict[str, dict[str, str]] = {
         "claude_path_desc": "Empty: look for claude on PATH and in the usual install locations",
         "external_port": "MCP server port (0 = random)",
         "external_port_desc": "Fixed port to use the server from outside; applies when the extension is re-enabled",
+        "gen3d_title": "AI 3D generation",
+        "meshy_key": "Meshy API key",
+        "meshy_key_desc": "Meshy API key (meshy.ai, paid plan). Empty: use the MESHY_API_KEY environment variable",
+        "tripo_key": "Tripo API key",
+        "tripo_key_desc": "Tripo API key (tsk_…). Empty: use the TRIPO_API_KEY environment variable",
+        "gen3d_provider": "Default service",
+        "gen3d_provider_desc": "Service generate_3d_model uses when Claude does not pick one",
+        "tripo_region": "Tripo site",
+        "tripo_region_desc": "Where the Tripo key was created: a key only works on its own site",
+        "tripo_region_ai": "International (tripo3d.ai)",
+        "tripo_region_com": "China (tripo3d.com)",
+        "gen3d_keys_note": "Keys stay in Blender's preferences, never in the .blend, and are not sent to Claude.",
+        "gen3d_offline": (
+            "AI 3D generation needs the internet and Blender's online access is off. "
+            "Turn on Preferences › System › Network › Allow Online Access and try again."
+        ),
+        "gen3d_no_key": (
+            "The {provider} API key is missing. Paste it in Preferences › Extensions › "
+            "BlenderCraft Assistant › AI 3D generation (or set the {env} environment "
+            "variable) and try again."
+        ),
+        "gen3d_bad_key": (
+            "{provider} rejected the API key. Check it in Preferences › Extensions › "
+            "BlenderCraft Assistant (for Tripo, also check the key's site)."
+        ),
+        "gen3d_no_credits": (
+            "{provider} refused for lack of credits or plan: the API needs a paid "
+            "plan with credits left."
+        ),
+        "gen3d_rate_limit": "{provider} is rate limiting requests; wait a moment and try again.",
+        "gen3d_key_hint": "AI 3D generation: no key. Set one in Preferences › Extensions › BlenderCraft Assistant.",
+        "gen3d_running": "Generating 3D model ({provider}): {stage} {percent}",
+        "gen3d_cancel": "Cancel generation",
         "menu_3mf": "3D Manufacturing Format (.3mf)",
         "import_3mf": "Import 3MF",
         "export_3mf": "Export 3MF",

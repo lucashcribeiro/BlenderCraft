@@ -1,11 +1,34 @@
 """Runs registered tools with undo steps, change tracking and truncation."""
 
+import threading
 import traceback
 from contextlib import nullcontext
 from dataclasses import replace
 
 from ..undo import ChangeTracker, push_step
 from .base import REGISTRY, ToolResult, truncate
+
+# Tracker of the off-main-thread tool call running on this thread.
+_local = threading.local()
+
+
+def current_tracker() -> ChangeTracker | None:
+    """Tracker handed to the running off-main-thread handler (or None)."""
+    return getattr(_local, "tracker", None)
+
+
+def scene_step(fn, label: str, tracker: ChangeTracker | None = None):
+    """Run fn as one AI change: inside the AI scope, followed by an undo
+    step "IA: <label>" (pushed even if fn raises, like call_tool does).
+    Main thread only: off-main-thread handlers wrap this in run_on_main."""
+    scope = tracker.ai_scope() if tracker is not None else nullcontext()
+    with scope:
+        try:
+            return fn()
+        finally:
+            push_step(label)
+            if tracker is not None:
+                tracker.record_ai_step()
 
 
 def call_tool(
@@ -14,6 +37,9 @@ def call_tool(
     tool = REGISTRY.get(name)
     if tool is None:
         return ToolResult(text=f"Unknown tool: {name}", is_error=True)
+
+    if not tool.main_thread:
+        return _call_off_main(tool, args, tracker)
 
     if tracker is not None and name == "undo":
         refused = _check_undo_limit(args, tracker)
@@ -43,6 +69,18 @@ def call_tool(
                 )
         if tracker is not None and result.undo_delta:
             tracker.shift_ai_steps(result.undo_delta)
+    return replace(result, text=truncate(result.text))
+
+
+def _call_off_main(tool, args: dict, tracker: ChangeTracker | None) -> ToolResult:
+    """Run a main_thread=False handler on this thread (no bpy here)."""
+    _local.tracker = tracker
+    try:
+        result = tool.handler(args)
+    except BaseException:  # noqa: BLE001 - reported as an error result
+        result = ToolResult(text=traceback.format_exc(), is_error=True)
+    finally:
+        _local.tracker = None
     return replace(result, text=truncate(result.text))
 
 

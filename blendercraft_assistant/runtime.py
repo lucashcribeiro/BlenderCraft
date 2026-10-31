@@ -24,6 +24,7 @@ from .claude.process import TOOL_PREFIX, ClaudeProcess, build_args, find_claude
 from .claude.session import MAX_TOOL_CALLS, NOTE_KEYS, AgentSession
 from .claude.system_prompt import build_system_prompt, context_line
 from .conversations import ConversationStore
+from .gen3d import jobs as gen3d_jobs
 from .i18n import lang, t
 from .mcp.protocol import McpHandler
 from .mcp.server import McpServer
@@ -219,6 +220,11 @@ def _call(name: str, args: dict):
             ),
             is_error=True,
         )
+    tool = REGISTRY.get(name)
+    if tool is not None and not tool.main_thread:
+        # Long network waits (AI 3D generation) stay on this server thread;
+        # the handler goes to the main thread itself for the bpy parts.
+        return call_tool(name, args, tracker)
     return mainthread.run_on_main(lambda: call_tool(name, args, tracker))
 
 
@@ -305,6 +311,7 @@ def _deny_pending(reason: str) -> None:
     global _approval_epoch
     _approval_epoch += 1
     _clear_permits()  # approvals were for the work being cancelled
+    gen3d_jobs.registry.cancel_all()  # AI 3D generations of that work too
     _resolve_pending(False, reason)
 
 

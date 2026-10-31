@@ -28,6 +28,12 @@ class Tool:
     # read: only reads; scene: changes the scene; file: writes to disk
     kind: Literal["read", "scene", "file"]
     push_undo: bool = True  # only applies when kind == "scene"
+    # False: the handler runs on the calling (MCP server) thread instead of
+    # Blender's main thread, for long network waits. It must not touch bpy
+    # except through mainthread.run_on_main, and it pushes its own undo step
+    # (dispatch.scene_step); call_tool neither pushes one nor opens the AI
+    # scope for it.
+    main_thread: bool = True
 
 
 REGISTRY: dict[str, Tool] = {}
