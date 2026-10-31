@@ -373,6 +373,38 @@ def _vertical_run(tree: BVHTree, x: float, y: float, z_from: float, floor: float
     return None
 
 
+def _pivot_in_part(name: str, want_z: float, dp_mm: float, c: float):
+    """Deepest point inside a separate leg near the wanted pivot height:
+    searched on vertical lines through the centre of the part's upper half.
+    Returns (point, distance to the surface) or None."""
+    obj = art._part(name)
+    bm = art._world_bm(obj)
+    try:
+        zs = [v.co.z for v in bm.verts]
+        z_lo, z_hi = min(zs), max(zs)
+        upper = [v.co for v in bm.verts if v.co.z >= (z_lo + z_hi) / 2]
+        centre = sum(upper, Vector()) / max(1, len(upper))
+        tree = BVHTree.FromBMesh(bm)
+    finally:
+        bm.free()
+    need = art._bu(dp_mm / 2) + c + art._bu(1.0)
+    best, best_fit = None, None
+    for i in range(41):
+        z = z_lo + (z_hi - z_lo) * (0.35 + 0.65 * i / 40)
+        for dx, dy in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
+            p = Vector((centre.x + dx * art._bu(1.5), centre.y + dy * art._bu(1.5), z))
+            if not art._inside(tree, p):
+                continue
+            depth = tree.find_nearest(p)[3]
+            if depth is None:
+                continue
+            if depth >= need and (best_fit is None or abs(z - want_z) < abs(best_fit[0].z - want_z)):
+                best_fit = (p, depth)
+            if best is None or depth > best[1]:
+                best = (p, depth)
+    return best_fit or best
+
+
 def plan_from_template(target: str, template_name: str | None = None, options: dict | None = None) -> dict:
     options = dict(options or {})
     template = load_template(template_name)
@@ -399,6 +431,10 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
     top = floor + art._bu(height)
     centre_w = sum(v[wi] for v in verts) / max(1, len(verts))
     steps, notes, table = [], [], []
+    # Loose bits a cut can leave (slivers between the cutter and the sculpt's
+    # own grooves): dropped when under 0.15 % of the figure, and reported.
+    volume = art.mesh_topology(target)["volume_mm3"]
+    drop_mm3 = round(max(1.0, 0.0015 * volume), 2)
     use_waist = bool(options.get("waist", template["waist"]["enabled"]))
     use_legs = bool(options.get("legs", template["legs"]["enabled"]))
     front, rear = target, f"{target}_traseira"
@@ -453,7 +489,7 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
             {
                 "op": "cut", "id": "waist", "part": target, "new_part_name": rear,
                 "cutter": {"type": "plane", "point": art._point_mm(cut_point), "normal": [round(x, 6) for x in rear_dir]},
-                "gap_mm": gap,
+                "gap_mm": gap, "drop_shells_under_mm3": drop_mm3,
             }
         )
         # Ball on the front, socket in the rear: the pivot sits in the rear,
@@ -465,7 +501,7 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
                 "op": "joint", "id": "waist", "parent": rear, "child": front, "type": "ball",
                 "pivot": art._point_mm(pivot), "axis": [0.0, 0.0, 1.0], "size_mm": ball,
                 "neck_mm": neck, "mouth_mm": round(mouth, 3), "clearance_mm": clearance,
-                "range_deg": template["waist"]["lateral_deg"], "relief": False,
+                "range_deg": template["waist"]["lateral_deg"], "relief": False, "role": "waist",
             }
         )
         # Built last: by then the legs hang from their halves, so the waist
@@ -511,8 +547,39 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
                 notes.append(f"{label}: pivot raised to {art._to_mm(pz - floor)} mm to stay inside the body")
             pivot = foot.copy()
             pivot.z = pz
+            if existing:
+                found = _pivot_in_part(leg["part"], pivot_z, dp, c)
+                if found is None:
+                    notes.append(f"{label}: no point inside {leg['part']} thick enough for a pin; skipped")
+                    continue
+                pivot, thick = found
+                if thick < art._bu(dp / 2 + clearance + 1.0):
+                    dp = round(max(legs_t["pin_mm"]["min"], 2 * (thick * mm - clearance - 1.0)), 3)
+                    notes.append(f"{label}: pin {dp} mm to fit the part at the pivot")
+                pz = pivot.z
             side = 1.0 if label.endswith("right") else -1.0
             outward = width_vec * side
+            outer_reach = radius
+            if not existing and not walk:
+                # Keep a thigh cap: knuckle and column stay min_wall +
+                # clearance + 0.5 mm inside the body's outer surface, so the
+                # cap stays joined to the body and hides the joint.
+                hits = art._ray_hits(tree, pivot, outward)
+                if hits:
+                    room = hits[0] - art._bu(rules["min_wall_mm"] + clearance + 0.5)
+                    if room < radius:
+                        if room < dp / 2 + c + art._bu(1.2):
+                            notes.append(
+                                f"{label}: the leg is flush with the body side; no room for a "
+                                f"thigh cap ({art._to_mm(hits[0])} mm to the surface)"
+                            )
+                        else:
+                            outer_reach = room
+                            notes.append(
+                                f"{label}: knuckle radius {art._to_mm(room)} mm (not "
+                                f"{art._to_mm(radius)}) to keep a {rules['min_wall_mm']} mm thigh cap"
+                            )
+                            radius = room
             turn = axis.cross(-up)
             if walk:
                 rng = [-span_out / 2, span_out / 2]
@@ -529,15 +596,17 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
             else:
                 column_size = [0.0, 0.0, 0.0]
                 column_size[li] = round(ext_l * mm, 3)
-                column_size[wi] = round(ext_w * mm, 3)
+                column_size[wi] = round((ext_w / 2 + outer_reach) * mm, 3)
                 column_size[2] = round((pz - z_cut + art._bu(0.5)) * mm, 3)
                 column_centre = foot.copy()
+                column_centre[wi] = foot[wi] + side * (outer_reach - ext_w / 2) / 2
                 column_centre.z = (pz + z_cut - art._bu(0.5)) / 2
                 knuckle_a = pivot - axis * (along / 2)
                 knuckle_b = pivot + axis * (along / 2)
                 steps.append(
                     {
                         "op": "cut", "id": label, "part": parent, "new_part_name": child, "gap_mm": clearance,
+                        "drop_shells_under_mm3": drop_mm3,
                         "cutter": {
                             "type": "union",
                             "parts": [
@@ -554,7 +623,7 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
                 {
                     "op": "joint", "id": label, "parent": parent, "child": child, "type": "pin",
                     "pivot": art._point_mm(pivot), "axis": [round(x, 6) for x in axis], "size_mm": dp,
-                    "clearance_mm": clearance, "range_deg": rng, "relief": True,
+                    "clearance_mm": clearance, "range_deg": rng, "relief": True, "role": "leg",
                     "relief_radius_mm": round(reach * mm, 3),
                 }
             )

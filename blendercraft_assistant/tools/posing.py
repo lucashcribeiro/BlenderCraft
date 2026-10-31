@@ -89,7 +89,7 @@ def find_legs(figure: list) -> list[dict]:
         if "bc_axis" not in pivot:
             continue
         meshes = [o for o in pivot.children_recursive if o.type == "MESH"]
-        if not meshes or not _LEG_WORD.search(pivot.name):
+        if not meshes or not (_LEG_WORD.search(pivot.name) or _role(pivot) == "leg"):
             continue
         axis_i = "XYZ".index(pivot["bc_axis"])
         axis = (pivot.matrix_world.to_3x3() @ Matrix.Identity(3).col[axis_i]).normalized()
@@ -120,6 +120,13 @@ def find_legs(figure: list) -> list[dict]:
         legs.append({"name": obj.name, "mode": "objects", "pivot": None, "point": (lo + hi) / 2,
                      "axis": axis, "main": obj, "objects": group})
     return legs
+
+
+def _role(pivot) -> str | None:
+    try:
+        return json.loads(pivot.get("bc_joint", "{}")).get("role")
+    except (TypeError, ValueError):
+        return None
 
 
 def _state(leg: dict, centre: Vector) -> tuple[float, float, Vector]:

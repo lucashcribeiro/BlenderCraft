@@ -161,23 +161,22 @@ def _mesh_ok(mesh) -> bool:
 
 
 def _boolean(target, operation: str, cutters: list) -> float:
-    """Apply EXACT booleans between target and world-space bmeshes.
-
-    Several cutters go in one boolean through a temporary collection. When
-    the result breaks a watertight target, it is redone one cutter at a
-    time, and then with the MANIFOLD solver (also exact on watertight input).
+    """Apply EXACT booleans between target and world-space bmeshes, one
+    cutter at a time. When the result breaks a watertight target, it is
+    redone with the MANIFOLD solver (also exact on watertight input).
     Returns the seconds spent. The cutter bmeshes are not freed.
     """
     start = time.perf_counter()
     was_ok = _mesh_ok(target.data)
     if not was_ok:
-        _boolean_once(target, operation, cutters)
+        for cutter in cutters:
+            _boolean_once(target, operation, [cutter])
         return time.perf_counter() - start
     backup = target.data.copy()
-    attempts = [("EXACT", [cutters])]
-    if len(cutters) > 1:
-        attempts.append(("EXACT", [[c] for c in cutters]))
-    attempts.append(("MANIFOLD", [[c] for c in cutters]))
+    # One cutter per boolean: an EXACT boolean with a collection operand
+    # also intersects the cutters with each other and is ~30x slower on a
+    # 400k-face part.
+    attempts = [("EXACT", [[c] for c in cutters]), ("MANIFOLD", [[c] for c in cutters])]
     try:
         for n, (solver, groups) in enumerate(attempts):
             if n:
@@ -1704,6 +1703,7 @@ def add_joint(
     neck_mm: float | None = None,
     mouth_mm: float | None = None,
     relief_radius_mm: float | None = None,
+    role: str | None = None,
 ) -> dict:
     joint_type = str(joint_type).lower()
     if joint_type not in _JOINT_TYPES:
@@ -1763,6 +1763,13 @@ def add_joint(
                 dp = min(_bu(5.0), max(_bu(1.6), 1.5 * (t_perp - c - wall)))
             else:
                 dp = _bu(size_mm)
+            fit = 2 * (t_perp - c - _bu(0.8))
+            if t_perp < dp / 2 + c + _bu(0.8) and fit >= _bu(2.0):
+                warnings.append(
+                    f"pin reduced from {_to_mm(dp)} to {_to_mm(fit)} mm: the child is only "
+                    f"{_to_mm(t_perp)} mm thick around the pivot"
+                )
+                dp = fit
             if t_perp < dp / 2 + c + _bu(0.8):
                 raise ValueError(
                     f"pin: the child is only {_to_mm(t_perp)} mm thick around the pivot "
@@ -1999,7 +2006,8 @@ def add_joint(
     if make_pivot:
         pivot_name = _make_pivot(child_obj, parent_obj, p, a)
         bpy.data.objects[pivot_name]["bc_joint"] = json.dumps(
-            {"type": joint_type, "parent": parent_obj.name, "clearance_mm": c_mm, "range_deg": list(rng)}
+            {"type": joint_type, "parent": parent_obj.name, "clearance_mm": c_mm, "range_deg": list(rng),
+             "role": str(role) if role else None}
         )
     result = {
         "joint": joint_type,
@@ -2390,13 +2398,14 @@ def articulate_figure(name: str, plan=None, dry_run: bool = False) -> dict:
                                step.get("gap_mm", 0.3), step.get("allow_multiple_shells", False),
                                step.get("drop_shells_under_mm3", 0.0))
                 brief = {"child": res["child"], "parts": {
-                    k: f"{v['components']} shell(s), manifold={v['manifold']}" for k, v in res["parts"].items()}}
+                    k: f"{v['components']} shell(s), manifold={v['manifold']}" for k, v in res["parts"].items()},
+                    "dropped_mm3": res["dropped_slivers_mm3"], "timings": res["timings_s"]}
             elif op == "joint":
                 res = add_joint(step["parent"], step["child"], step["type"], step["pivot"], step["axis"],
                                 step.get("size_mm"), step.get("clearance_mm", 0.30), step.get("range_deg"),
                                 step.get("relief"), bool(step.get("test", True)),
                                 bool(step.get("make_pivot", True)), step.get("neck_mm"), step.get("mouth_mm"),
-                                step.get("relief_radius_mm"))
+                                step.get("relief_radius_mm"), step.get("role"))
                 sweep = res.get("sweep", {})
                 table.append(
                     {
@@ -2413,7 +2422,7 @@ def articulate_figure(name: str, plan=None, dry_run: bool = False) -> dict:
                         "ok": res["measured"]["ok"],
                     }
                 )
-                brief = {"built": res["built"], "warnings": res.get("warnings", [])}
+                brief = {"built": res["built"], "warnings": res.get("warnings", []), "timings": res["timings"]}
             elif op == "note":
                 brief = {"note": step.get("text")}
             else:
@@ -2620,6 +2629,7 @@ register_tool(
                 "neck_mm": {"type": "number"},
                 "mouth_mm": {"type": "number"},
                 "relief_radius_mm": {"type": "number"},
+                "role": {"type": "string", "description": "e.g. leg, waist, neck, tail (set_pose finds legs by it)"},
                 "description": {"type": "string"},
             },
             "required": ["parent", "child", "type", "pivot", "axis"],
@@ -2629,7 +2639,7 @@ register_tool(
                 str(a["parent"]), str(a["child"]), a["type"], a["pivot"], a["axis"],
                 a.get("size_mm"), a.get("clearance_mm", 0.30), a.get("range_deg"),
                 a.get("relief"), bool(a.get("test", True)), bool(a.get("make_pivot", True)),
-                a.get("neck_mm"), a.get("mouth_mm"), a.get("relief_radius_mm"),
+                a.get("neck_mm"), a.get("mouth_mm"), a.get("relief_radius_mm"), a.get("role"),
             )
         ),
         kind="scene",

@@ -125,6 +125,12 @@ class TemplateTest(unittest.TestCase):
             topo = mesh_topology(obj.name)
             self.assertEqual(topo["components"], 1, obj.name)
             self.assertTrue(topo["manifold"], obj.name)
+        # The leg joints are found by role: set_pose lays all four flat.
+        result, posed = _call("set_pose", {"target": "print"})
+        self.assertFalse(result.is_error, result.text)
+        self.assertEqual(len(posed["legs"]), 4)
+        self.assertTrue(all(abs(abs(l["turned_deg"]) - 90) < 2 for l in posed["legs"]), posed["legs"])
+        _call("set_pose", {"target": "rest"})
         # Legs swing 0..90 deg outward without collision.
         for obj in bpy.data.objects:
             if obj.name.startswith("BC_Pivo_Dog_leg"):
