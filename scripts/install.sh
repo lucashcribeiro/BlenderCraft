@@ -4,23 +4,29 @@
 #
 #   scripts/install.sh          copy the files
 #   scripts/install.sh --dev    symlink them, so edits in the repo apply at once
+#   scripts/install.sh --app    also build BlenderCraft.app into ~/Applications
+#                               (combines with --dev)
 #
 # Environment overrides (mostly for tests):
 #   BLENDERCRAFT_CONFIG_DIR   Blender config dir
 #                             (default: ~/Library/Application Support/Blender/5.2)
 #   BLENDERCRAFT_BLENDER_APP  Blender.app location (default: /Applications/Blender.app)
+#   BLENDERCRAFT_APPS_DIR     where --app installs the app (default: ~/Applications)
+#   BLENDERCRAFT_LSREGISTER   lsregister used to register the app with the Finder
 set -euo pipefail
 
 MODE=copy
+APP=no
 for arg in "$@"; do
   case "$arg" in
     --dev) MODE=dev ;;
+    --app) APP=yes ;;
     -h|--help)
-      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
-      echo "Opcao desconhecida: $arg (use --dev ou nada)" >&2
+      echo "Opcao desconhecida: $arg (use --dev, --app ou nada)" >&2
       exit 2
       ;;
   esac
@@ -85,4 +91,22 @@ else
   echo "Claude Code encontrado em $CLAUDE."
 fi
 
-echo "Pronto. Abra o BlenderCraft com scripts/BlenderCraft.command."
+if [ "$APP" = yes ]; then
+  APPS_DIR="${BLENDERCRAFT_APPS_DIR:-$HOME/Applications}"
+  LSREGISTER="${BLENDERCRAFT_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}"
+  DIST="${BLENDERCRAFT_DIST_DIR:-$REPO/dist}"
+  BLENDERCRAFT_DIST_DIR="$DIST" bash "$REPO/scripts/build_app.sh" >/dev/null
+  mkdir -p "$APPS_DIR"
+  APP_DST="$APPS_DIR/BlenderCraft.app"
+  APP_TMP="$APPS_DIR/.BlenderCraft.app.tmp.$$"
+  rm -rf -- "$APP_TMP"
+  cp -R "$DIST/BlenderCraft.app" "$APP_TMP"
+  rm -rf -- "$APP_DST"
+  mv "$APP_TMP" "$APP_DST"
+  # Tells the Finder about the app, its icon and the files it opens.
+  "$LSREGISTER" -f "$APP_DST"
+  echo "  app:       $APP_DST"
+  echo "Pronto. Abra o BlenderCraft pelo app (Launchpad, Spotlight ou $APPS_DIR)."
+else
+  echo "Pronto. Abra o BlenderCraft com scripts/BlenderCraft.command (ou instale o app com --app)."
+fi

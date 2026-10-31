@@ -631,10 +631,20 @@ class InstallScriptTest(unittest.TestCase):
         self.config = self.tmp / "config"
         self.fake_blender = self.tmp / "Blender.app"
         self.fake_blender.mkdir()
+        # Never register the test app with the real LaunchServices.
+        self.lsregister_log = self.tmp / "lsregister.log"
+        self.fake_lsregister = self.tmp / "lsregister"
+        self.fake_lsregister.write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "$@" >> "{self.lsregister_log}"\n', encoding="utf-8"
+        )
+        self.fake_lsregister.chmod(0o755)
 
     def run_install(self, *args, blender_app=None, home=None, path="/usr/bin:/bin"):
         env = dict(os.environ)
         env["BLENDERCRAFT_CONFIG_DIR"] = str(self.config)
+        env["BLENDERCRAFT_APPS_DIR"] = str(self.tmp / "Applications")
+        env["BLENDERCRAFT_DIST_DIR"] = str(self.tmp / "dist")
+        env["BLENDERCRAFT_LSREGISTER"] = str(self.fake_lsregister)
         env["BLENDERCRAFT_BLENDER_APP"] = str(blender_app or self.fake_blender)
         env["HOME"] = str(home or self.tmp)
         env["PATH"] = path
@@ -736,9 +746,39 @@ class InstallScriptTest(unittest.TestCase):
         result = self.run_install("--help")
         self.assertEqual(result.returncode, 0)
         self.assertIn("--dev", result.stdout)
+        self.assertIn("--app", result.stdout)
         self.assertIn("BLENDERCRAFT_BLENDER_APP", result.stdout)
+        self.assertIn("BLENDERCRAFT_APPS_DIR", result.stdout)
         self.assertNotIn("set -euo", result.stdout)
         self.assertFalse(self.config.exists())
+
+    @unittest.skipUnless(shutil.which("osacompile"), "macOS only")
+    def test_app_option_installs_and_registers_the_app(self):
+        result = self.run_install("--app")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        app = self.tmp / "Applications" / "BlenderCraft.app"
+        self.assertTrue((app / "Contents" / "Info.plist").is_file())
+        self.assertTrue((app / "Contents" / "Resources" / "BlenderCraft.icns").is_file())
+        self.assertEqual(self.lsregister_log.read_text().split(), ["-f", str(app)])
+        # The template and the extension are installed as usual.
+        template, extension = self.targets()
+        self.assertTrue((template / "__init__.py").is_file())
+        self.assertTrue((extension / "blender_manifest.toml").is_file())
+        self.assertIn(str(app), result.stdout)
+
+    @unittest.skipUnless(shutil.which("osacompile"), "macOS only")
+    def test_app_option_replaces_an_older_app(self):
+        old = self.tmp / "Applications" / "BlenderCraft.app" / "Contents" / "stale.txt"
+        old.parent.mkdir(parents=True)
+        old.write_text("old", encoding="utf-8")
+        self.assertEqual(self.run_install("--app", "--dev").returncode, 0)
+        self.assertFalse(old.exists())
+        self.assertTrue(self.targets()[0].is_symlink())
+
+    def test_without_app_option_no_app_is_installed(self):
+        self.assertEqual(self.run_install().returncode, 0)
+        self.assertFalse((self.tmp / "Applications").exists())
+        self.assertFalse(self.lsregister_log.exists())
 
     def test_unknown_option_fails(self):
         result = self.run_install("--bogus")
