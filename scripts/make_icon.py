@@ -1,9 +1,10 @@
-"""Draws the BlenderCraft app icon (1024 x 1024 PNG) in the "Craft apps" style.
+"""Draws the BlenderCraft app icon (1024 x 1024 PNG).
 
-Flat, vector-like: a violet macOS-style tile, a cream isometric cube with
-thick black outlines and mesh lines on its top, Blender's orange on the selected
-vertex and a cream chat bubble for the assistant. Every shape is a signed
-distance field, so edges are antialiased at any size.
+An original mark in Blender's palette, not Blender's logo: a deep blue to
+navy macOS-style tile, a white isometric cube with an orange orbit ring
+around it (behind the cube at the back, in front of it at the bottom) and a
+small white chat bubble with blue dots for the assistant. Every shape is a
+signed distance field, so edges are antialiased at any size.
 
 Runs with Blender's own Python (it ships numpy), from the repository root:
 
@@ -11,6 +12,7 @@ Runs with Blender's own Python (it ships numpy), from the repository root:
         --python scripts/make_icon.py -- scripts/assets/BlenderCraft.png
 """
 
+import math
 import struct
 import sys
 import zlib
@@ -20,17 +22,17 @@ import numpy as np
 
 SIZE = 1024
 SS = 2  # supersampling factor for the final downscale
-OUTLINE = 30.0  # black outline width, in 1024-px units
 
-# Family palette: one saturated tile colour (a sibling-free violet), cream
-# illustration, black outlines, orange accent.
-TILE = (108, 78, 224)
-GRID = (134, 108, 236)
-CREAM = (241, 234, 218)
-CREAM_LEFT = (226, 216, 194)
-CREAM_RIGHT = (208, 196, 170)
-INK = (20, 18, 24)
-ORANGE = (242, 122, 58)
+# Blender's palette: orange, blue, white, on a deep blue to navy tile.
+TILE_TOP = (38, 87, 135)  # #265787
+TILE_BOTTOM = (16, 28, 52)
+ORANGE = (245, 121, 42)  # #F5792A
+ORANGE_DARK = (232, 125, 13)  # #E87D0D
+BLUE = (86, 128, 194)  # #5680C2
+WHITE = (255, 255, 255)
+CUBE_LEFT = (214, 225, 240)
+CUBE_RIGHT = (170, 190, 220)
+EDGE = (20, 36, 64)
 
 
 def _grid(n):
@@ -93,8 +95,9 @@ class Canvas:
         return np.clip(0.5 - sd / self.px, 0.0, 1.0)
 
     def paint(self, cov, color, opacity=1.0):
+        """color: an RGB triple (0-255) or an (n, n, 3) array of them."""
         a = cov * opacity
-        col = np.array(color, dtype=np.float32) / 255.0
+        col = np.asarray(color, dtype=np.float32) / 255.0
         out_a = a + self.alpha * (1.0 - a)
         safe = np.where(out_a > 0, out_a, 1.0)
         self.rgb = (col * a[..., None] + self.rgb * (self.alpha * (1.0 - a))[..., None]) / safe[..., None]
@@ -106,14 +109,9 @@ class Canvas:
     def stroke(self, sd_unsigned, width, color):
         self.paint(self.coverage(sd_unsigned - width / 2.0), color)
 
-    def fill_and_outline(self, sd, color, width=OUTLINE):
-        # Outline centred on the edge: half of it eats into the fill.
-        self.fill(sd, color)
-        self.stroke(np.abs(sd), width, color=INK)
-
 
 def iso_cube(cx, cy, edge):
-    """Corners of an isometric cube whose front vertical edge starts at (cx, cy)."""
+    """Faces of an isometric cube whose front vertical edge starts at (cx, cy)."""
     c30 = edge * 0.8660254
     top = (cx, cy - edge)
     right = (cx + c30, cy - edge / 2)
@@ -127,14 +125,18 @@ def iso_cube(cx, cy, edge):
         "left": [left, centre, bottom, bottom_left],
         "right": [centre, right, bottom_right, bottom],
         "silhouette": [top, right, bottom_right, bottom, bottom_left, left],
-        "centre": centre,
-        "top_vertex": top,
-        "right_vertex": right,
     }
 
 
-def lerp(a, b, t):
-    return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+def sd_ellipse_ring(x, y, cx, cy, rx, ry, angle):
+    """Approximate distance to a rotated ellipse's outline, and the local
+    vertical coordinate (positive on the near, lower half)."""
+    c, s = math.cos(angle), math.sin(angle)
+    u = (x - cx) * c + (y - cy) * s
+    v = -(x - cx) * s + (y - cy) * c
+    f = np.sqrt((u / rx) ** 2 + (v / ry) ** 2)
+    grad = np.sqrt((u / rx**2) ** 2 + (v / ry**2) ** 2) / np.maximum(f, 1e-6)
+    return np.abs(f - 1.0) / np.maximum(grad, 1e-6), v
 
 
 def draw(n):
@@ -146,49 +148,40 @@ def draw(n):
     half, radius = 412.0, 185.0
     tile = sd_round_box(x, y, centre, centre, half, half, radius)
     shadow = sd_round_box(x, y, centre, centre + 12, half, half, radius)
-    cv.paint(np.clip(1.0 - (shadow + 4.0) / 26.0, 0.0, 1.0) ** 2, (0, 0, 0), opacity=0.28)
-    cv.fill(tile, TILE)
+    cv.paint(np.clip(1.0 - (shadow + 4.0) / 26.0, 0.0, 1.0) ** 2, (0, 0, 0), opacity=0.3)
+    t = np.clip((y - (centre - half)) / (2 * half), 0.0, 1.0)[..., None]
+    gradient = np.array(TILE_TOP) * (1.0 - t) + np.array(TILE_BOTTOM) * t
+    cv.fill(tile, gradient)
 
-    # Faint print-bed grid on the tile, clipped to it.
-    step = 103.0
-    gx = np.abs(((x - centre) / step + 0.5) % 1.0 - 0.5) * step
-    gy = np.abs(((y - centre) / step + 0.5) % 1.0 - 0.5) * step
-    grid = np.minimum(gx, gy) - 2.0
-    cv.paint(cv.coverage(grid) * cv.coverage(tile + 6.0), GRID)
+    # The orbit: a tilted orange ring around the cube.
+    cube_cx, cube_cy, edge = 484.0, 596.0, 232.0
+    ring, near = sd_ellipse_ring(x, y, cube_cx, cube_cy - edge / 2 + 14, 342.0, 116.0, math.radians(-16))
+    ring_width = 54.0
+    back = cv.coverage(ring - ring_width / 2) * (near < 0)
+    cv.paint(back, ORANGE_DARK)
 
-    # The cube, slightly left and low; the bubble sits top right.
-    cube = iso_cube(470.0, 575.0, 262.0)
-    cv.fill(sd_polygon(x, y, cube["left"]), CREAM_LEFT)
-    cv.fill(sd_polygon(x, y, cube["right"]), CREAM_RIGHT)
-    cv.fill(sd_polygon(x, y, cube["top"]), CREAM)
-
-    # Mesh lines on the top face only: more detail is noise at 32 px.
+    # The cube: white top, light blue sides, thin navy edges.
+    cube = iso_cube(cube_cx, cube_cy, edge)
+    cv.fill(sd_polygon(x, y, cube["left"]), CUBE_LEFT)
+    cv.fill(sd_polygon(x, y, cube["right"]), CUBE_RIGHT)
+    cv.fill(sd_polygon(x, y, cube["top"]), WHITE)
     t_, r_, c_, l_ = cube["top"]
     _, _, b_, _ = cube["left"]
-    mesh = np.minimum(
-        sd_segment(x, y, lerp(t_, r_, 0.5), lerp(l_, c_, 0.5)),
-        sd_segment(x, y, lerp(t_, l_, 0.5), lerp(r_, c_, 0.5)),
-    )
-    cv.stroke(mesh, 13.0, INK)
+    edges = np.minimum(sd_polyline(x, y, [l_, c_, r_]), sd_segment(x, y, c_, b_))
+    cv.stroke(edges, 10.0, EDGE)
+    cv.stroke(np.abs(sd_polygon(x, y, cube["silhouette"])), 14.0, EDGE)
 
-    # Outlines: silhouette and the three inner edges.
-    cv.stroke(np.abs(sd_polygon(x, y, cube["silhouette"])), OUTLINE, INK)
-    inner = sd_polyline(x, y, [l_, c_, r_])
-    inner = np.minimum(inner, sd_segment(x, y, c_, b_))
-    cv.stroke(inner, OUTLINE, INK)
+    # The near half of the orbit passes in front of the cube.
+    front = cv.coverage(ring - ring_width / 2) * (near >= 0)
+    cv.paint(front, ORANGE)
 
-    # Selected vertex, Blender orange.
-    vx, vy = cube["top_vertex"]
-    cv.fill_and_outline(sd_circle(x, y, vx, vy, 34.0), ORANGE, width=18.0)
-
-    # Assistant chat bubble with a tail pointing at the cube.
-    bx, by, bw, bh, br = 690.0, 300.0, 132.0, 96.0, 48.0
+    # Assistant chat bubble, top right: white with Blender-blue dots.
+    bx, by, bw, bh, br = 718.0, 262.0, 116.0, 82.0, 60.0
     body = sd_round_box(x, y, bx, by, bw, bh, br)
-    tail = sd_polygon(x, y, [(bx - 70, by + 60), (bx - 128, by + 152), (bx + 4, by + 80)])
-    bubble = np.minimum(body, tail)
-    cv.fill_and_outline(bubble, CREAM, width=OUTLINE)
+    tail = sd_polygon(x, y, [(bx - 74, by + 40), (bx - 118, by + 128), (bx - 8, by + 72)])
+    cv.fill(np.minimum(body, tail), WHITE)
     for i in (-1, 0, 1):
-        cv.fill(sd_circle(x, y, bx + i * 50.0, by, 17.0), ORANGE if i == 1 else INK)
+        cv.fill(sd_circle(x, y, bx + i * 44.0, by, 16.0), BLUE)
 
     rgba = np.concatenate([cv.rgb, cv.alpha[..., None]], axis=-1)
     return np.clip(rgba, 0.0, 1.0)
