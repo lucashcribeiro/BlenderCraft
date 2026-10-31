@@ -87,11 +87,13 @@ class TemplateTest(unittest.TestCase):
         )
         self.assertFalse(result.is_error, result.text)
         self.assertAlmostEqual(plan["scale"], 50.25 / 28.0, places=2)
+        self.assertEqual(len(plan["steps"]), 10)
+        plan["steps"] = tpl.scene_plan()
         ids = [(s["op"], s["id"]) for s in plan["steps"]]
         self.assertEqual(ids[0], ("cut", "waist"))
         self.assertEqual(ids[-1], ("joint", "waist"))
         self.assertEqual(len(ids), 10, plan["notes"])
-        self.assertTrue(plan["helpers"])
+        self.assertGreater(plan["helpers"], 0)
         self.assertIn("BC_Plano", bpy.data.collections)
         waist_ball = plan["steps"][-1]
         self.assertEqual(waist_ball["size_mm"], 12.0)  # 7.0 x 1.79 clamped to 12
@@ -109,7 +111,7 @@ class TemplateTest(unittest.TestCase):
                 self.assertEqual(step["range_deg"], [0.0, 90.0] if x < 0 else [-90.0, 0.0])
         for batch in ([0], [1, 2], [3, 4], [5, 6], [7, 8], [9]):
             result, built = _call(
-                "articulate_figure", {"name": "Dog", "plan": {"steps": plan["steps"], "only": batch}}
+                "articulate_figure", {"name": "Dog", "plan": {"steps": "scene", "only": batch}}
             )
             self.assertFalse(result.is_error, result.text)
             self.assertNotIn("failed_step", built, json.dumps(built.get("failed_step"), indent=1)[:3000])
@@ -136,6 +138,39 @@ class TemplateTest(unittest.TestCase):
             if obj.name.startswith("BC_Pivo_Dog_leg"):
                 sweep = articulate.joints.joint_test(obj.name, start=-95, end=95, step=5)
                 self.assertGreaterEqual(sweep["free_max"] - sweep["free_min"], 90.0, (obj.name, sweep))
+
+    def test_default_template_review_leg(self):
+        """Built-in standard: pivot T/2 over the belly, chamfered leg with a
+        turned top, 0.30 mm kept through 0-90 deg, flat print pose."""
+        _puppy("Dog", s=1.5)
+        result, plan = _call("apply_articulation_template", {"target": "Dog", "show_helpers": False})
+        self.assertFalse(result.is_error, result.text)
+        legs = [r for r in plan["table"] if r["item"].startswith("leg_")]
+        self.assertEqual(len(legs), 4)
+        for row in legs:
+            self.assertAlmostEqual(row["pivot_above_belly_mm"], row["knuckle_radius_mm"], delta=0.05)
+        spines = [r for r in plan["table"] if r["item"].startswith("spine_")]
+        self.assertTrue(all(r["mm"] >= 2.4 for r in spines), spines)
+        steps = tpl.scene_plan()
+        cut = next(s for s in steps if s["op"] == "cut" and s["id"] == "leg_rear_right")
+        kinds = [p["type"] for p in cut["cutter"]["parts"]]
+        self.assertEqual(kinds, ["box", "prism", "revolution"])
+        joint = next(s for s in steps if s["op"] == "joint" and s["id"] == "leg_rear_right")
+        self.assertEqual(joint["pin_flat_mm"], 0.2)
+        self.assertEqual(joint["hole_tip"], [1.0, 0.0, 0.0])  # up once the leg lies flat
+        result, built = _call("articulate_figure", {"name": "Dog", "plan": {"steps": "scene"}})
+        self.assertFalse(result.is_error, result.text)
+        self.assertNotIn("failed_step", built, json.dumps(built.get("failed_step"))[:2000])
+        for row in built["table"]:
+            self.assertTrue(row["ok"], row)
+        waist = next(r for r in built["table"] if r["type"] == "ball")
+        self.assertLessEqual(waist["built_range_deg"][0], -10.0)
+        self.assertGreaterEqual(waist["built_range_deg"][1], 10.0)
+        sweep = articulate.clearance_sweep("BC_Pivo_Dog_leg_rear_right", -90, 0, 15)
+        self.assertGreaterEqual(sweep["min_gap_mm"], CLEARANCE - 0.02, sweep)
+        result, posed = _call("set_pose", {"target": "print"})
+        self.assertFalse(result.is_error, result.text)
+        self.assertEqual(posed["bed"]["first_layer_gaps_under_min"], [])
 
     def test_builtin_default_template_loads(self):
         data = tpl.load_template("cachorrinho-2.0")

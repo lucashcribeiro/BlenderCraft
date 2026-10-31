@@ -5,21 +5,31 @@
   "assembled_clearance_mm": 0.2,
   "min_wall_mm": 1.2,
   "pin_embed_mm": 1.5,
+  "min_embed_mm": 1.2,
+  "vertical_clearance_mm": 0.4,
   "min_detail_mm": 0.4
  },
  "legs": {
   "enabled": true,
   "joint": "pin",
   "axis": "length",
+  "pivot_rule": "belly_plus_half_thickness",
   "pivot_height_rel": 0.38,
+  "chamfer_rel": 0.25,
   "pin_mm": {
    "ref": 2.5,
    "min": 2.0,
-   "max": 4.0
+   "max": 6.0
   },
-  "hole": "pin + 2 x clearance",
-  "knuckle_radius": "half the leg width",
+  "pin_flat_mm": 0.2,
+  "embed_mm": {
+   "ref": 1.5,
+   "min": 1.2
+  },
+  "hole": "teardrop: pin + 2 x clearance, 45 deg tip up in the print pose",
+  "knuckle_radius": "half the leg thickness",
   "min_leg_width_mm": 5.5,
+  "spine_min_mm": 2.4,
   "range_deg": {
    "outward": 90.0,
    "inward": 0.0
@@ -52,7 +62,8 @@
    "max": 10.0
   },
   "lateral_deg": 10.0,
-  "twist_deg": 30.0
+  "twist_deg": 30.0,
+  "relief": true
  },
  "neck": {
   "enabled": false,
@@ -74,7 +85,7 @@
  },
  "format": "blendercraft-articulation-template/1",
  "name": "cachorrinho-2.0",
- "description": "Padrão do projeto executivo v1.0 (cachorrinho 2.0 corrigido): pernas com pino transversal ao longo do corpo, nó redondo e bolsão varrido 0-90° com abertura em U; cintura com bola Ø7,0 na frente e soquete Ø7,6 atrás; folgas 0,30 fixas.",
+ "description": "Padrão do projeto executivo v1.0 com a revisão de engenharia (Dog-Padrao-V1, seção 6): perna em bloco chanfrado com topo de revolução, pivô T/2 acima da barriga, pino de base plana em furo gota, bolsão varrido 0-90° com arco lateral; cintura com bola Ø7,0 na frente e soquete Ø7,6 atrás; folgas 0,30 fixas.",
  "spec": "projeto-executivo-articulacao-quadrupedes.md v1.0",
  "measured": {
   "source": "2.0 CACHORRINHO (dossier): leg pins 2.50/2.77 mm with 0.42-0.55 mm clearance, waist gap 0.78 mm, cap + transverse pin"

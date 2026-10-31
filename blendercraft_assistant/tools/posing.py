@@ -258,8 +258,12 @@ def apply_pose(target: str, parts=None, remember: bool = True) -> dict:
             "No legs found: they need a BC_Pivo_ pivot named for a leg, or SolidCraft "
             "names (04-perna-frente|tras-x+|- with 08-pino-perna-<same>)"
         )
-    if remember and not scene.get(_REST_KEY):
-        scene[_REST_KEY] = json.dumps(_snapshot(figure))
+    if remember:
+        saved = scene.get(_REST_KEY)
+        names = set(json.loads(saved)) if saved else set()
+        # A snapshot of another figure (or an older scene) does not count.
+        if not saved or not {o.name for o in figure} <= names:
+            scene[_REST_KEY] = json.dumps(_snapshot(figure))
     lo, hi = _bbox(figure)
     centre = (lo + hi) / 2
     report = []
@@ -273,8 +277,66 @@ def apply_pose(target: str, parts=None, remember: bool = True) -> dict:
         report.append({"leg": leg["name"], "was": before, "turned_deg": round(math.degrees(angle), 2),
                        "hinge": leg["mode"], "moved": [o.name for o in leg["objects"]]})
     shift = _ground(figure)
-    return {"target": target, "legs": report, "raised_mm": art._to_mm(shift),
-            "note": "set_pose target 'rest' restores the pose before the first set_pose"}
+    result = {"target": target, "legs": report, "raised_mm": art._to_mm(shift),
+              "note": "set_pose target 'rest' restores the pose before the first set_pose"}
+    if target == "print":
+        result["bed"] = first_layer(figure)
+    return result
+
+
+def first_layer(figure: list, layer_mm: float = 0.2, min_gap_mm: float = 0.3) -> dict:
+    """Which parts rest on the bed (Z = 0), how high the others float, and
+    the gaps between parts in the first layer (they must not touch)."""
+    layer = art._bu(layer_mm)
+    lifted, bottoms = {}, {}
+    from mathutils.bvhtree import BVHTree
+
+    for obj in figure:
+        if obj.type != "MESH" or not obj.data.vertices:
+            continue
+        bm = art._world_bm(obj)
+        low = min(v.co.z for v in bm.verts)
+        lifted[obj.name] = art._to_mm(low)
+        if low <= layer:
+            faces = [f for f in bm.faces if min(v.co.z for v in f.verts) <= layer + art._bu(0.05)]
+            sub = bmesh_from_faces(faces)
+            bottoms[obj.name] = sub
+        bm.free()
+    names = sorted(bottoms)
+    tight = []
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            gap = art._sampled_gap(bottoms[a], bottoms[b], 200_000)
+            if gap is not None and gap * art._mm() < min_gap_mm:
+                tight.append({"parts": [a, b], "gap_mm": art._to_mm(gap)})
+    for sub in bottoms.values():
+        sub.free()
+    return {
+        "on_bed": names,
+        "lowest_mm": lifted,
+        "floating": {n: z for n, z in lifted.items() if z > layer_mm},
+        "first_layer_gaps_under_min": tight,
+        "ok": not tight and all(z <= layer_mm for z in lifted.values()),
+    }
+
+
+def bmesh_from_faces(faces):
+    import bmesh
+
+    out = bmesh.new()
+    vmap = {}
+    for f in faces:
+        vs = []
+        for v in f.verts:
+            if v not in vmap:
+                vmap[v] = out.verts.new(v.co)
+            vs.append(vmap[v])
+        try:
+            out.faces.new(vs)
+        except ValueError:
+            pass
+    out.normal_update()
+    return out
 
 
 def _measure(figure: list, legs: list) -> list[dict]:

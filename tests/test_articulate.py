@@ -222,14 +222,14 @@ class AddJointTest(ArticulateBase):
             "type": "union",
             "parts": [
                 LEG_BOX,
-                # Tab x 2.0..4.3 inside the body (half-width 6.6 at z 10.5).
-                {"type": "box", "center": [3.15, 8, 10], "size": [2.3, 4.6, 6]},
+                # Tab x 2.0..4.3 inside the body (half-width 7.6 at z 11.5).
+                {"type": "box", "center": [3.15, 8, 10.5], "size": [2.3, 4.6, 7]},
             ],
         }
         self._cut_leg(cutter)
         result, data = _call(
             "add_joint",
-            {"parent": "Puppy", "child": "Leg", "type": "pin", "pivot": [3.15, 8, 10.5],
+            {"parent": "Puppy", "child": "Leg", "type": "pin", "pivot": [3.15, 8, 11.5],
              "axis": [1, 0, 0], "size_mm": 2.0, "range_deg": 30},
         )
         self.assertFalse(result.is_error, result.text)

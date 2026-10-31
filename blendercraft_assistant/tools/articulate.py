@@ -33,7 +33,8 @@ _GAP_TOLERANCE_MM = 0.02
 _MIN_WALL_MM = 1.2
 # A pin is embedded at least this deep in each wall, under this much skin.
 _PIN_EMBED_MM = 1.5
-_PIN_SKIN_MM = 0.4
+_PIN_MIN_EMBED_MM = 1.2
+_PIN_SKIN_MM = 1.2
 # Segments of the round primitives: a 48-gon deviates 0.006 mm from a
 # 3 mm circle, far under the gap tolerance.
 _SEGMENTS = 48
@@ -351,6 +352,98 @@ def _box_bm(center, size, rotation: Matrix | None = None) -> bmesh.types.BMesh:
     return bm
 
 
+def _octagon(width: float, thickness: float, chamfer: float) -> list[tuple[float, float]]:
+    """Rectangle width x thickness with 45 deg chamfers, counter-clockwise."""
+    w, t, c = width / 2, thickness / 2, chamfer
+    pts = [(w, -t + c), (w, t - c), (w - c, t), (-w + c, t), (-w, t - c), (-w, -t + c), (-w + c, -t), (w - c, -t)]
+    out = []
+    for p in pts:
+        if not out or (abs(out[-1][0] - p[0]) > 1e-9 or abs(out[-1][1] - p[1]) > 1e-9):
+            out.append(p)
+    return out
+
+
+def _prism_bm(p0, p1, width_axis: Vector, width: float, thickness: float, chamfer: float):
+    """Octagonal prism from p0 to p1; width along width_axis."""
+    d = (Vector(p1) - Vector(p0)).normalized()
+    u = Vector(width_axis).normalized()
+    v = d.cross(u).normalized()
+    bm = bmesh.new()
+    rings = []
+    for base in (Vector(p0), Vector(p1)):
+        rings.append([bm.verts.new(base + u * a + v * b) for a, b in _octagon(width, thickness, chamfer)])
+    n = len(rings[0])
+    bm.faces.new(list(reversed(rings[0])))
+    bm.faces.new(rings[1])
+    for i in range(n):
+        j = (i + 1) % n
+        bm.faces.new((rings[0][i], rings[0][j], rings[1][j], rings[1][i]))
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    return bm
+
+
+def _revolution_bm(p0, p1, radius: float, chamfer: float, outer: bool = False):
+    """Cylinder with 45 deg conical ends (an octagon section turned about
+    its axis): what a chamfered leg top sweeps around its pin."""
+    if outer:
+        radius /= math.cos(math.pi / _SEGMENTS)
+    axis = Vector(p1) - Vector(p0)
+    length = axis.length
+    rot = _axis_matrix(axis.normalized())
+    base = Vector(p0)
+    if chamfer > 1e-9:
+        profile = [(0.0, radius - chamfer), (chamfer, radius), (length - chamfer, radius), (length, radius - chamfer)]
+    else:
+        profile = [(0.0, radius), (length, radius)]
+    bm = bmesh.new()
+    rings = []
+    for z, r in profile:
+        ring = []
+        for k in range(_SEGMENTS):
+            a = 2 * math.pi * (k + 0.5) / _SEGMENTS  # no vertex on the axis planes
+            local = Vector((r * math.cos(a), r * math.sin(a), z))
+            ring.append(bm.verts.new(base + rot.to_3x3() @ local))
+        rings.append(ring)
+    for a_ring, b_ring in zip(rings, rings[1:]):
+        for k in range(_SEGMENTS):
+            j = (k + 1) % _SEGMENTS
+            bm.faces.new((a_ring[k], a_ring[j], b_ring[j], b_ring[k]))
+    bm.faces.new(list(reversed(rings[0])))
+    bm.faces.new(rings[-1])
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    return bm
+
+
+def _pin_bm(p0, p1, radius: float, flat: float, down: Vector = Vector((0.0, 0.0, -1.0))):
+    """Pin with a flat underside (cut `flat` deep): prints without a sag."""
+    axis = (Vector(p1) - Vector(p0)).normalized()
+    down = down - axis * down.dot(axis)
+    if down.length < 1e-6:
+        return _cylinder_bm(p0, p1, radius)
+    down.normalize()
+    limit = radius - flat
+    pts = []
+    for base in (Vector(p0), Vector(p1)):
+        for o in _perpendicular_dirs(axis, _SEGMENTS):
+            q = o * radius
+            depth = q.dot(down)
+            if depth > limit:
+                q -= down * (depth - limit)
+            pts.append(base + q)
+    return _hull_bm(pts)
+
+
+def _teardrop_bm(p0, p1, radius: float, tip: Vector):
+    """Hole with a 45 deg roof pointing to `tip`: prints without support."""
+    axis = (Vector(p1) - Vector(p0)).normalized()
+    radius /= math.cos(math.pi / _SEGMENTS)
+    pts = []
+    for base in (Vector(p0), Vector(p1)):
+        pts.extend(base + o * radius for o in _perpendicular_dirs(axis, _SEGMENTS))
+        pts.append(base + tip * radius * math.sqrt(2.0))
+    return _hull_bm(pts)
+
+
 def _hull_bm(points) -> bmesh.types.BMesh:
     """Convex hull of points as a closed bmesh."""
     bm = bmesh.new()
@@ -436,6 +529,28 @@ def _parse_cutter(spec, depth: int = 0) -> dict:
             "center": _vec_mm(spec.get("center"), "cutter.center"),
             "radius": _bu(_number(spec.get("radius"), "cutter.radius", 0.0, allow_zero=False)),
         }
+    if kind in ("prism", "revolution"):
+        start = _vec_mm(spec.get("start"), "cutter.start")
+        end = _vec_mm(spec.get("end"), "cutter.end")
+        if (end - start).length < 1e-9:
+            raise ValueError(f"{kind} cutter start and end must differ")
+        chamfer = _bu(_number(spec.get("chamfer", 0.0), "cutter.chamfer", 0.0))
+        if kind == "revolution":
+            radius = _bu(_number(spec.get("radius"), "cutter.radius", 0.0, allow_zero=False))
+            if chamfer >= radius or 2 * chamfer >= (end - start).length:
+                raise ValueError("revolution chamfer must be smaller than the radius and half the length")
+            return {"type": kind, "start": start, "end": end, "radius": radius, "chamfer": chamfer}
+        width = _bu(_number(spec.get("width"), "cutter.width", 0.0, allow_zero=False))
+        thickness = _bu(_number(spec.get("thickness"), "cutter.thickness", 0.0, allow_zero=False))
+        if 2 * chamfer >= min(width, thickness):
+            raise ValueError("prism chamfer must be under half the width and the thickness")
+        d = (end - start).normalized()
+        u = _direction(spec.get("width_axis"), "cutter.width_axis")
+        u = u - d * u.dot(d)
+        if u.length < 1e-6:
+            raise ValueError("prism width_axis must not be along start -> end")
+        return {"type": kind, "start": start, "end": end, "width": width, "thickness": thickness,
+                "chamfer": chamfer, "width_axis": u.normalized()}
     if kind == "union":
         parts = spec.get("parts")
         if depth > 0:
@@ -443,7 +558,9 @@ def _parse_cutter(spec, depth: int = 0) -> dict:
         if not isinstance(parts, list) or not 1 <= len(parts) <= 8:
             raise ValueError("union cutter needs parts: a list of 1 to 8 cutters")
         return {"type": "union", "parts": [_parse_cutter(p, depth + 1) for p in parts]}
-    raise ValueError(f"Unknown cutter type {kind!r}: use plane, box, cylinder, sphere or union")
+    raise ValueError(
+        f"Unknown cutter type {kind!r}: use plane, box, cylinder, sphere, prism, revolution or union"
+    )
 
 
 def _cutter_prims(cutter: dict) -> list[dict]:
@@ -474,6 +591,17 @@ def _prim_bm(prim: dict, dilate: float, reach: float, around: Vector) -> bmesh.t
         )
     if kind == "sphere":
         return _sphere_bm(prim["center"], prim["radius"] + dilate, outer=dilate > 0)
+    # Offsetting an octagon by d moves each 45 deg face by d too: the chamfer
+    # legs grow by d (2 - sqrt 2).
+    grow = dilate * (2.0 - math.sqrt(2.0))
+    if kind == "prism":
+        d = (prim["end"] - prim["start"]).normalized()
+        return _prism_bm(prim["start"] - d * dilate, prim["end"] + d * dilate, prim["width_axis"],
+                         prim["width"] + 2 * dilate, prim["thickness"] + 2 * dilate, prim["chamfer"] + grow)
+    if kind == "revolution":
+        d = (prim["end"] - prim["start"]).normalized()
+        return _revolution_bm(prim["start"] - d * dilate, prim["end"] + d * dilate,
+                              prim["radius"] + dilate, prim["chamfer"] + grow, outer=dilate > 0)
     raise ValueError(f"unknown primitive {kind}")
 
 
@@ -487,7 +615,7 @@ def _cutter_to_mm(cutter: dict) -> dict:
             continue
         if key == "rotation":
             out["rotation_deg"] = [round(math.degrees(a), 4) for a in value.to_euler()]
-        elif key == "normal":
+        elif key in ("normal", "width_axis"):
             out[key] = [round(c, 6) for c in value]
         elif isinstance(value, Vector):
             out[key] = _point_mm(value)
@@ -1469,10 +1597,16 @@ def _relief_bm(child, parent, pivot, axis, clearance, range_deg, keep, rho_overr
             for prim in _cutter_prims(spec):
                 # Exactly the cut's own clearance: faces coplanar with the
                 # cut faces are robust, nearly coplanar ones are not.
-                grown = _prim_bm(prim, clearance, reach, around)
+                # Turn-invariant pieces (the knuckle) are exactly the cut's own
+                # clearance: coplanar with the cut faces, which EXACT handles.
+                # Swept pieces get 0.05 mm more: their facets would otherwise
+                # graze the cut faces, and nearly coincident faces break the
+                # booleans that follow.
+                invariant = _turn_invariant(prim, pivot, axis)
+                grown = _prim_bm(prim, clearance + (0.0 if invariant else _bu(0.05)), reach, around)
                 piece = _bm_boolean(grown, "INTERSECT", [ball])
                 grown.free()
-                pieces.append((piece, _turn_invariant(prim, pivot, axis)))
+                pieces.append((piece, invariant))
             offsets = [Vector()]
         else:
             whole = _world_bm(child)
@@ -1511,7 +1645,7 @@ def _turn_invariant(prim: dict, pivot: Vector, axis: Vector) -> bool:
     eps = _bu(1e-3)
     if prim["type"] == "sphere":
         return (prim["center"] - pivot).length < eps
-    if prim["type"] == "cylinder":
+    if prim["type"] in ("cylinder", "revolution"):
         d = (prim["end"] - prim["start"]).normalized()
         if abs(abs(d.dot(axis)) - 1.0) > 1e-6:
             return False
@@ -1704,6 +1838,9 @@ def add_joint(
     mouth_mm: float | None = None,
     relief_radius_mm: float | None = None,
     role: str | None = None,
+    pin_flat_mm: float | None = None,
+    hole_tip=None,
+    embed_mm: float | None = None,
 ) -> dict:
     joint_type = str(joint_type).lower()
     if joint_type not in _JOINT_TYPES:
@@ -1770,6 +1907,18 @@ def add_joint(
                     f"{_to_mm(t_perp)} mm thick around the pivot"
                 )
                 dp = fit
+            embed_target = _bu(max(_PIN_MIN_EMBED_MM, _number(embed_mm, "embed_mm", 0.0)) if embed_mm is not None
+                               else _PIN_EMBED_MM)
+            flat = _bu(_number(pin_flat_mm, "pin_flat_mm", 0.0)) if pin_flat_mm else 0.0
+            if flat >= dp / 2:
+                raise ValueError("pin_flat_mm must be under the pin radius")
+            tip = None
+            if hole_tip is not None:
+                tip = _direction(hole_tip, "hole_tip")
+                tip = tip - a * tip.dot(a)
+                if tip.length < 1e-6:
+                    raise ValueError("hole_tip must not be along the axis")
+                tip.normalize()
             if t_perp < dp / 2 + c + _bu(0.8):
                 raise ValueError(
                     f"pin: the child is only {_to_mm(t_perp)} mm thick around the pivot "
@@ -1778,9 +1927,20 @@ def add_joint(
                 )
             if use_relief:
                 t = time.perf_counter()
-                # The walls that anchor the pin are spared by the relief.
+                # The walls that anchor the pin, beyond both ends of the
+                # child along the axis, are spared by the relief.
+                cb = _world_bm(child_obj)
+                proj = [(v.co - p).dot(a) for v in cb.verts]
+                cb.free()
                 span = _bu(1000.0)
-                keep = _cylinder_bm(p - a * span, p + a * span, dp / 2 + c + wall)
+                keep_r = dp / 2 + c + wall
+                keeps = [
+                    _cylinder_bm(p + a * (max(proj) + c), p + a * span, keep_r),
+                    _cylinder_bm(p - a * span, p + a * (min(proj) - c), keep_r),
+                ]
+                keep = _bm_boolean(keeps[0], "UNION", [keeps[1]])
+                for k_bm in keeps:
+                    k_bm.free()
                 reliefs, rho = _relief_bm(child_obj, parent_obj, p, a, c, rng, keep, rho_set)
                 keep.free()
                 if reliefs:
@@ -1804,8 +1964,8 @@ def add_joint(
                         t_out = max(t_out, rim[0])
                 hits = _ray_hits(parent_tree, p, d)
                 wall_len = (hits[1] - hits[0]) if len(hits) >= 2 else 0.0
-                if hits and wall_len >= _bu(_PIN_EMBED_MM + _PIN_SKIN_MM):
-                    embed = min(_bu(2.5), wall_len - _bu(_PIN_SKIN_MM))
+                if hits and wall_len >= _bu(_PIN_MIN_EMBED_MM + _PIN_SKIN_MM):
+                    embed = min(embed_target, wall_len - _bu(_PIN_SKIN_MM))
                     sides[sign] = {
                         "hole_end": t_out + _bu(1.0),
                         "pin_end": hits[0] + embed,
@@ -1823,7 +1983,7 @@ def add_joint(
                     }
             if not any(s["anchored"] for s in sides.values()):
                 raise ValueError(
-                    f"pin: no parent wall of {_PIN_EMBED_MM + _PIN_SKIN_MM} mm or more on either side of the "
+                    f"pin: no parent wall of {_PIN_MIN_EMBED_MM + _PIN_SKIN_MM} mm or more on either side of the "
                     "child along the axis; the pin cannot anchor. Use a ball "
                     "joint, or cut the child with a tab that sits inside the parent."
                 )
@@ -1833,8 +1993,11 @@ def add_joint(
                     "the axis on the other side unless something else holds it"
                 )
             t = time.perf_counter()
-            pin = _cylinder_bm(p - a * sides[-1]["pin_end"], p + a * sides[1]["pin_end"], dp / 2)
-            hole = _cylinder_bm(p - a * sides[-1]["hole_end"], p + a * sides[1]["hole_end"], dp / 2 + c, outer=True)
+            p0, p1 = p - a * sides[-1]["pin_end"], p + a * sides[1]["pin_end"]
+            pin = _pin_bm(p0, p1, dp / 2, flat) if flat > 0 else _cylinder_bm(p0, p1, dp / 2)
+            h0, h1 = p - a * sides[-1]["hole_end"], p + a * sides[1]["hole_end"]
+            hole = (_teardrop_bm(h0, h1, dp / 2 + c, tip) if tip is not None
+                    else _cylinder_bm(h0, h1, dp / 2 + c, outer=True))
             try:
                 _boolean(child_obj, "DIFFERENCE", [hole])
                 _boolean(parent_obj, "UNION", [pin])
@@ -1845,7 +2008,9 @@ def add_joint(
             built.update(
                 {
                     "pin_diameter_mm": _to_mm(dp),
+                    "pin_flat_mm": _to_mm(flat),
                     "hole_diameter_mm": _to_mm(dp + 2 * c),
+                    "hole_teardrop_tip": None if tip is None else [round(x, 4) for x in tip],
                     "sides": {("+axis" if k > 0 else "-axis"): {kk: vv for kk, vv in v.items() if kk.endswith("_mm") or kk == "anchored"} for k, v in sides.items()},
                 }
             )
@@ -1863,7 +2028,26 @@ def add_joint(
                     "to the child)"
                 )
             max_r0 = d_child - 3 * c - wall
+            # Room around the socket away from the child (other cuts, the
+            # outside): the socket keeps a min_wall everywhere.
+            parent_tree0 = _world_tree(parent_obj)
+            room = min(
+                (h[0] for h in (_ray_hits(parent_tree0, p, d) for d in _sphere_dirs(120) if d.dot(u) < 0.5) if h),
+                default=None,
+            )
             r0 = _bu(size_mm) / 2 if size_mm is not None else min(_bu(6.0), max_r0)
+            if room is not None and r0 + c + wall + _bu(0.1) > room:
+                fit = room - c - wall - _bu(0.1)
+                if fit >= _bu(1.5):
+                    warnings.append(
+                        f"ball reduced from {_to_mm(2 * r0)} to {_to_mm(2 * fit)} mm to keep a "
+                        f"{_MIN_WALL_MM} mm wall around the socket"
+                    )
+                    if neck_mm is not None:
+                        neck_mm = min(neck_mm, _to_mm(2 * fit) * 0.57)
+                    if mouth_mm is not None:
+                        mouth_mm = min(mouth_mm, _to_mm(2 * fit) - 0.4)
+                    r0 = fit
             if r0 < _bu(1.5) or r0 > max_r0 + 1e-9:
                 need = _to_mm(max(r0, _bu(1.5)) + 3 * c + wall)
                 raise ValueError(
@@ -1875,7 +2059,8 @@ def add_joint(
             rn = _bu(_number(neck_mm, "neck_mm", 0.5)) / 2 if neck_mm is not None else max(_bu(0.6), 0.55 * r0)
             mouth = _bu(_number(mouth_mm, "mouth_mm", 0.5)) / 2 if mouth_mm is not None else rn + c
             if mouth < rn + c - 1e-9:
-                raise ValueError("ball: mouth_mm must be at least neck_mm + 2 x clearance")
+                warnings.append("ball: mouth widened to neck + 2 x clearance")
+                mouth = rn + c
             if mouth >= r0:
                 raise ValueError(
                     f"ball: the socket mouth ({_to_mm(2 * mouth)} mm) must be smaller than the "
@@ -2179,6 +2364,58 @@ def boolean_parts(target: str, tools: list[str], operation: str, delete_tools: b
     }
 
 
+# ---------------------------------------------------------------- clearance sweep
+
+
+def clearance_sweep(pivot: str, start: float = 0.0, end: float = 90.0, step: float = 5.0,
+                    radius_mm: float | None = None) -> dict:
+    """Minimum gap between a joint's moving part and the rest, angle by angle
+    (the scene is not changed)."""
+    pivot_obj = joints._get_pivot(pivot)
+    meshes = [o for o in pivot_obj.children_recursive if o.type == "MESH"]
+    if not meshes:
+        raise ValueError(f"{pivot} moves no mesh")
+    if step <= 0 or end < start or (end - start) / step > 360:
+        raise ValueError("need start <= end and a step > 0 (at most 360 steps)")
+    info = {}
+    try:
+        info = json.loads(pivot_obj.get("bc_joint", "{}"))
+    except (TypeError, ValueError):
+        pass
+    parent = bpy.data.objects.get(info.get("parent", "")) if info.get("parent") else None
+    child = max(meshes, key=lambda o: len(o.data.vertices))
+    p = pivot_obj.matrix_world.translation.copy()
+    axis_i = "XYZ".index(pivot_obj["bc_axis"])
+    axis = (pivot_obj.matrix_world.to_3x3() @ Matrix.Identity(3).col[axis_i]).normalized()
+    radius = _bu(radius_mm) if radius_mm else max(child.dimensions) * 1.2
+    obstacles = _obstacles(child, parent) if parent else [
+        o for o in bpy.context.scene.objects
+        if o.type == "MESH" and o.visible_get() and o not in meshes
+    ]
+    static = _cropped_world(obstacles, p, radius)
+    moving = _cropped_world(meshes, p, radius)
+    rows = []
+    try:
+        n = int(round((end - start) / step))
+        for k in range(n + 1):
+            angle = start + k * step
+            posed = moving.copy()
+            posed.transform(_rotate_about(p, axis, math.radians(angle)))
+            gap = _sampled_gap(posed, static, 400_000)
+            posed.free()
+            rows.append({"angle": round(angle, 3), "min_gap_mm": None if gap is None else _to_mm(gap, 3)})
+    finally:
+        static.free()
+        moving.free()
+    gaps = [r["min_gap_mm"] for r in rows if r["min_gap_mm"] is not None]
+    return {
+        "pivot": pivot_obj.name,
+        "rows": rows,
+        "min_gap_mm": min(gaps) if gaps else None,
+        "within_mm": _to_mm(radius),
+    }
+
+
 # ---------------------------------------------------------------- compare_surface
 
 
@@ -2358,6 +2595,10 @@ def articulate_figure(name: str, plan=None, dry_run: bool = False) -> dict:
     t0 = time.perf_counter()
     if "steps" in plan:
         steps = plan["steps"]
+        if steps == "scene":
+            from .articulation_templates import scene_plan
+
+            steps = scene_plan()
         if not isinstance(steps, list) or not steps:
             raise ValueError("plan.steps must be a non-empty list")
         analysis = None
@@ -2405,7 +2646,8 @@ def articulate_figure(name: str, plan=None, dry_run: bool = False) -> dict:
                                 step.get("size_mm"), step.get("clearance_mm", 0.30), step.get("range_deg"),
                                 step.get("relief"), bool(step.get("test", True)),
                                 bool(step.get("make_pivot", True)), step.get("neck_mm"), step.get("mouth_mm"),
-                                step.get("relief_radius_mm"), step.get("role"))
+                                step.get("relief_radius_mm"), step.get("role"), step.get("pin_flat_mm"),
+                                step.get("hole_tip"), step.get("embed_mm"))
                 sweep = res.get("sweep", {})
                 table.append(
                     {
@@ -2630,6 +2872,9 @@ register_tool(
                 "mouth_mm": {"type": "number"},
                 "relief_radius_mm": {"type": "number"},
                 "role": {"type": "string", "description": "e.g. leg, waist, neck, tail (set_pose finds legs by it)"},
+                "pin_flat_mm": {"type": "number", "description": "pin: flat underside this deep (0.2 at 35 mm)"},
+                "hole_tip": {**_POINT, "description": "pin: teardrop hole, 45 deg tip toward this direction"},
+                "embed_mm": {"type": "number", "description": "pin: depth in each wall (default 1.5, min 1.2)"},
                 "description": {"type": "string"},
             },
             "required": ["parent", "child", "type", "pivot", "axis"],
@@ -2640,6 +2885,7 @@ register_tool(
                 a.get("size_mm"), a.get("clearance_mm", 0.30), a.get("range_deg"),
                 a.get("relief"), bool(a.get("test", True)), bool(a.get("make_pivot", True)),
                 a.get("neck_mm"), a.get("mouth_mm"), a.get("relief_radius_mm"), a.get("role"),
+                a.get("pin_flat_mm"), a.get("hole_tip"), a.get("embed_mm"),
             )
         ),
         kind="scene",
@@ -2714,6 +2960,37 @@ register_tool(
 
 register_tool(
     Tool(
+        name="joint_clearance_sweep",
+        description=(
+            "Measure a joint's clearance at every angle: turns the part hung "
+            "on the pivot from start to end (degrees, every step) without "
+            "changing the scene and returns the minimum gap to the other parts "
+            "at each angle (mm, 0 = touching). Use it to prove a leg keeps "
+            "0.30 mm through 0-90 deg."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "pivot": {"type": "string"},
+                "start": {"type": "number"},
+                "end": {"type": "number"},
+                "step": {"type": "number"},
+                "radius_mm": {"type": "number"},
+            },
+            "required": ["pivot"],
+        },
+        handler=_wrap(
+            lambda a: clearance_sweep(
+                str(a["pivot"]), float(a.get("start", 0.0)), float(a.get("end", 90.0)),
+                float(a.get("step", 5.0)), a.get("radius_mm"),
+            )
+        ),
+        kind="read",
+    )
+)
+
+register_tool(
+    Tool(
         name="compare_surface",
         description=(
             "Acceptance check that the sculpt was preserved: compares every "
@@ -2750,7 +3027,8 @@ register_tool(
             "others: [separate parts]} builds the steps from analyze_figure; "
             "or plan {steps: [{op: 'cut', part, cutter, new_part_name, gap_mm}, "
             "{op: 'joint', parent, child, type, pivot, axis, size_mm, "
-            "clearance_mm, range_deg, relief?, make_pivot?}], only: [step "
+            "clearance_mm, range_deg, relief?, make_pivot?}] or steps: 'scene' (the plan saved by "
+            "apply_articulation_template), only: [step "
             "indices to run now]}. dry_run returns the steps without "
             "changing anything. Plan helpers (BC_Plano) are removed first. One undo step. On heavy meshes (300k+ faces) "
             "prefer dry_run and then cut_part/add_joint one by one: each "
