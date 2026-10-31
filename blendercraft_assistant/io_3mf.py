@@ -131,8 +131,20 @@ def export_3mf(path: str, objects: list, mm_per_bu: float) -> list[str]:
     space and scaled by ``mm_per_bu``. Each object gets one base material
     whose color comes from its first material (sRGB), or ``#CCCCCC``.
     Objects without faces are skipped. Returns the names actually written.
+    The result is plain core-spec 3MF, which Bambu Studio and PrusaSlicer open
+    directly (named objects, one color each, items marked printable).
     """
-    model = ET.Element("model", {"xmlns": CORE_NS, "unit": "millimeter"})
+    model = ET.Element(
+        "model",
+        {
+            "xmlns": CORE_NS,
+            "unit": "millimeter",
+            "{http://www.w3.org/XML/1998/namespace}lang": "en-US",
+        },
+    )
+    # Slicers (Bambu Studio, PrusaSlicer) show the producing application;
+    # metadata has to come before resources in the schema.
+    ET.SubElement(model, "metadata", name="Application").text = "BlenderCraft"
     resources = ET.SubElement(model, "resources")
     basematerials = ET.SubElement(resources, "basematerials", id="1")
     build = ET.SubElement(model, "build")
@@ -171,7 +183,7 @@ def export_3mf(path: str, objects: list, mm_per_bu: float) -> list[str]:
             ET.SubElement(
                 tris_el, "triangle", v1=str(a), v2=str(b), v3=str(c)
             )
-        ET.SubElement(build, "item", objectid=object_id)
+        ET.SubElement(build, "item", objectid=object_id, printable="1")
         written_names.append(obj.name)
     if not written_names:
         raise ValueError("No mesh with faces to export")
