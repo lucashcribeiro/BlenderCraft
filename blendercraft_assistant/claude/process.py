@@ -75,6 +75,10 @@ def find_claude(pref_path: str = "") -> str | None:
 
 
 _CONFIG_PREFIX = "blendercraft-mcp-"
+# Per-call limit Claude Code applies to our MCP tools, in milliseconds. Its
+# default (60 s) aborts long booleans on heavy meshes; the main-thread wait in
+# mainthread.run_on_main (120 s) stays the real limit.
+MCP_TOOL_TIMEOUT_MS = 600_000
 
 
 def _write_mcp_config(config: dict) -> str:
@@ -131,6 +135,7 @@ def build_args(
                 "type": "http",
                 "url": mcp_url,
                 "headers": {"Authorization": f"Bearer {token}"},
+                "timeout": MCP_TOOL_TIMEOUT_MS,
             }
         }
     }

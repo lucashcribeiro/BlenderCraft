@@ -219,6 +219,9 @@ class BuildArgsTest(unittest.TestCase):
                         "type": "http",
                         "url": "http://127.0.0.1:5555/mcp",
                         "headers": {"Authorization": "Bearer tok"},
+                        # Claude Code aborts tool calls after 60 s by default;
+                        # booleans on heavy meshes can take longer.
+                        "timeout": 600000,
                     }
                 }
             },
