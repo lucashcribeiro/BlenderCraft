@@ -750,3 +750,171 @@ class InstallScriptTest(unittest.TestCase):
     def test_unknown_option_fails(self):
         result = self.run_install("--bogus")
         self.assertNotEqual(result.returncode, 0)
+
+
+class OpenArgsTest(unittest.TestCase):
+    def setUp(self):
+        self.template = load_template()
+
+    def test_paths_after_the_double_dash(self):
+        argv = ["Blender", "--app-template", "blendercraft", "--", "--bc-open", "/a b/x.stl",
+                "--bc-open=/c/y.3mf", "--other", "z"]
+        self.assertEqual(self.template.open_args(argv), ["/a b/x.stl", "/c/y.3mf"])
+
+    def test_blender_own_arguments_are_ignored(self):
+        argv = ["Blender", "--bc-open", "/x.stl", "--app-template", "blendercraft"]
+        self.assertEqual(self.template.open_args(argv), [])
+
+    def test_a_flag_without_a_path(self):
+        self.assertEqual(self.template.open_args(["Blender", "--", "--bc-open"]), [])
+
+
+def _result(data=None, error=None):
+    import json as _json
+
+    if error is not None:
+        return types.SimpleNamespace(is_error=True, text=f"Traceback ...\nValueError: {error}\n")
+    return types.SimpleNamespace(is_error=False, text=_json.dumps(data))
+
+
+class OpenFilesTest(unittest.TestCase):
+    """--bc-open: the files are imported with the extension's import_file
+    once the window, the extension and the layout are ready."""
+
+    DISPATCH = "bl_ext.user_default.blendercraft_assistant.tools.dispatch"
+
+    def setUp(self):
+        fresh_startup_file()
+        self.template = load_template()
+        self.template.setup_new_file()
+        self.template.unregister()  # no real timers in these tests
+        self.calls = []
+        self.results = {}
+        self.dispatch = types.ModuleType(self.DISPATCH)
+        self.dispatch.call_tool = self.call_tool
+        self.reported = []
+        self.framed = []
+        self.window = object()
+
+    def tearDown(self):
+        self.template.unregister()
+        fresh_startup_file()
+
+    def call_tool(self, name, args):
+        self.calls.append((name, args))
+        path = args["path"]
+        result = self.results[path]
+        if not result.is_error:
+            mesh = bpy.data.meshes.new(Path(path).stem)
+            obj = bpy.data.objects.new(Path(path).stem, mesh)
+            bpy.context.scene.collection.objects.link(obj)
+        return result
+
+    def tick(self, windows=True, enabled=True, layout_pending=False):
+        with mock.patch.dict(sys.modules, {self.DISPATCH: self.dispatch}), mock.patch.object(
+            self.template, "_windows", return_value=[self.window] if windows else []
+        ), mock.patch.object(
+            self.template, "_extension_enabled", return_value=enabled
+        ), mock.patch.object(
+            self.template, "_layout_pending", return_value=layout_pending
+        ), mock.patch.object(
+            self.template, "_report_errors", side_effect=self.reported.extend
+        ), mock.patch.object(
+            self.template, "_schedule_frame", side_effect=lambda: self.framed.append(True)
+        ):
+            return self.template._open_files()
+
+    def queue(self, *paths):
+        self.template._pending_open[:] = list(paths)
+        self.template._open_attempts = 0
+
+    def test_imports_each_file_and_frames_them(self):
+        self.results = {
+            "/m/a.stl": _result({"objects": [{"name": "a"}]}),
+            "/m/b.3mf": _result({"objects": [{"name": "b"}]}),
+        }
+        self.queue("/m/a.stl", "/m/b.3mf")
+        self.assertIsNone(self.tick())
+        self.assertEqual(
+            self.calls,
+            [("import_file", {"path": "/m/a.stl"}), ("import_file", {"path": "/m/b.3mf"})],
+        )
+        self.assertEqual(self.template._pending_open, [])
+        selected = sorted(o.name for o in bpy.context.view_layer.objects if o.select_get())
+        self.assertEqual(selected, ["a", "b"])
+        self.assertEqual(self.framed, [True])
+        self.assertEqual(self.reported, [])
+
+    def test_the_untouched_default_cube_makes_room(self):
+        self.results = {"/m/a.stl": _result({"objects": [{"name": "a"}]})}
+        self.queue("/m/a.stl")
+        self.tick()
+        self.assertNotIn("Cube", bpy.data.objects)
+        # Camera and light stay.
+        self.assertIn("Camera", bpy.data.objects)
+        self.assertIn("Light", bpy.data.objects)
+
+    def test_an_edited_cube_stays(self):
+        bpy.data.objects["Cube"].location.x = 5.0
+        self.results = {"/m/a.stl": _result({"objects": [{"name": "a"}]})}
+        self.queue("/m/a.stl")
+        self.tick()
+        self.assertIn("Cube", bpy.data.objects)
+
+    def test_failures_are_reported_and_the_rest_imported(self):
+        self.results = {
+            "/m/bad.stl": _result(error="File not found: /m/bad.stl"),
+            "/m/a.stl": _result({"objects": [{"name": "a"}]}),
+        }
+        self.queue("/m/bad.stl", "/m/a.stl")
+        self.tick()
+        self.assertEqual(self.reported, [("/m/bad.stl", "ValueError: File not found: /m/bad.stl")])
+        self.assertEqual(self.framed, [True])
+
+    def test_nothing_imported_keeps_the_cube_and_does_not_frame(self):
+        self.results = {"/m/bad.stl": _result(error="boom")}
+        self.queue("/m/bad.stl")
+        self.tick()
+        self.assertIn("Cube", bpy.data.objects)
+        self.assertEqual(self.framed, [])
+
+    def test_waits_for_window_extension_and_layout(self):
+        self.results = {"/m/a.stl": _result({"objects": [{"name": "a"}]})}
+        self.queue("/m/a.stl")
+        interval = self.template.OPEN_INTERVAL
+        self.assertEqual(self.tick(windows=False), interval)
+        self.assertEqual(self.tick(enabled=False), interval)
+        self.assertEqual(self.tick(layout_pending=True), interval)
+        self.assertEqual(self.calls, [])
+        self.assertIsNone(self.tick())
+        self.assertEqual(len(self.calls), 1)
+
+    def test_gives_up_with_a_message_without_the_extension(self):
+        self.queue("/m/a.stl")
+        self.template._open_attempts = self.template.MAX_OPEN_ATTEMPTS - 1
+        self.assertIsNone(self.tick(enabled=False))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.reported), 1)
+        self.assertEqual(self.reported[0][0], "/m/a.stl")
+        self.assertEqual(self.template._pending_open, [])
+
+    def test_nothing_to_open(self):
+        self.queue()
+        self.assertIsNone(self.tick())
+        self.assertEqual(self.calls, [])
+
+    def test_register_queues_the_command_line_files_once(self):
+        argv = ["Blender", "--", "--bc-open", "/m/a.stl"]
+        self.template._argv_read = False
+        with mock.patch.object(sys, "argv", argv), mock.patch("addon_utils.enable"):
+            self.template.register()
+            self.assertEqual(self.template._pending_open, ["/m/a.stl"])
+            self.assertTrue(bpy.app.timers.is_registered(self.template._open_files))
+            self.template._pending_open.clear()
+            self.template.register()  # e.g. the template activated again
+        self.assertEqual(self.template._pending_open, [])
+
+    def test_messages_in_both_languages(self):
+        for lang in ("pt", "en"):
+            for key in ("open_failed", "no_extension"):
+                self.assertIn("{name}", self.template.MESSAGES[lang][key])

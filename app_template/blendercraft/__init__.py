@@ -12,6 +12,8 @@ Nothing from the extension is imported at module level, so this module also
 loads in background mode without the extension installed.
 """
 
+import importlib
+import json
 import sys
 
 import bpy
@@ -382,6 +384,204 @@ def _schedule_enable() -> None:
         bpy.app.timers.register(_enable_extension, first_interval=ENABLE_INTERVAL, persistent=True)
 
 
+# --- Opening files from the command line ----------------------------------
+#
+# The BlenderCraft app passes the files the Finder opens with it after "--":
+#   Blender --app-template blendercraft -- --bc-open /a.stl --bc-open /b.3mf
+# Blender ignores everything after "--"; the template imports those files
+# with the extension's import_file tool (STL in mm, 3MF through io_3mf).
+
+OPEN_FLAG = "--bc-open"
+OPEN_INTERVAL = 0.5
+MAX_OPEN_ATTEMPTS = 40  # 20 s
+_open_attempts = 0
+_pending_open: list = []
+_argv_read = False
+
+MESSAGES = {
+    "pt": {
+        "open_failed": "Não foi possível abrir {name}",
+        "no_extension": "Não foi possível abrir {name}: a extensão BlenderCraft Assistant não está habilitada",
+    },
+    "en": {
+        "open_failed": "Could not open {name}",
+        "no_extension": "Could not open {name}: the BlenderCraft Assistant extension is not enabled",
+    },
+}
+
+
+def _message(key: str, **fmt) -> str:
+    lang = "pt" if (bpy.app.translations.locale or "").startswith("pt") else "en"
+    return MESSAGES[lang][key].format(**fmt)
+
+
+def open_args(argv) -> list:
+    """The paths given as ``--bc-open PATH`` (or ``--bc-open=PATH``) after "--"."""
+    if "--" not in argv:
+        return []
+    rest = list(argv[argv.index("--") + 1 :])
+    paths = []
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg == OPEN_FLAG and i + 1 < len(rest):
+            paths.append(rest[i + 1])
+            i += 2
+            continue
+        if arg.startswith(OPEN_FLAG + "="):
+            paths.append(arg[len(OPEN_FLAG) + 1 :])
+        i += 1
+    return paths
+
+
+def _queue_open_args() -> None:
+    """Queue the command-line files, once per Blender session."""
+    global _argv_read, _open_attempts
+    if _argv_read:
+        return
+    _argv_read = True
+    _pending_open.extend(open_args(sys.argv))
+    if _pending_open and not bpy.app.timers.is_registered(_open_files):
+        _open_attempts = 0
+        bpy.app.timers.register(_open_files, first_interval=OPEN_INTERVAL, persistent=True)
+
+
+def _layout_pending() -> bool:
+    return bpy.app.timers.is_registered(_tweak_ui)
+
+
+def _last_line(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else text
+
+
+def import_files(paths) -> tuple:
+    """Import each file with the extension's import_file tool.
+    Returns (names of the new objects, [(path, error), ...])."""
+    dispatch = importlib.import_module(f"{EXTENSION}.tools.dispatch")
+    names, errors = [], []
+    for path in paths:
+        result = dispatch.call_tool("import_file", {"path": path})
+        if result.is_error:
+            errors.append((path, _last_line(result.text)))
+            continue
+        try:
+            data = json.loads(result.text)
+        except ValueError:
+            continue
+        names += [o["name"] for o in data.get("objects", ()) if "name" in o]
+    return names, errors
+
+
+def _is_untouched_default_cube(obj) -> bool:
+    """The template's 20 mm cube, never moved, scaled or edited."""
+    if obj is None or obj.type != "MESH" or obj.parent is not None:
+        return False
+    if any(abs(v) > 1e-4 for v in obj.location) or any(abs(v) > 1e-4 for v in obj.rotation_euler):
+        return False
+    if any(abs(v - 1.0) > 1e-4 for v in obj.scale) or len(obj.data.vertices) != 8:
+        return False
+    half = DEFAULT_CUBE_SIZE_MM / 2.0
+    return all(abs(abs(c) - half) <= 1e-3 for v in obj.data.vertices for c in v.co)
+
+
+def _remove_default_cube() -> None:
+    cube = bpy.data.objects.get("Cube")
+    if _unsaved() and _is_untouched_default_cube(cube):
+        mesh = cube.data
+        bpy.data.objects.remove(cube)
+        if mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
+
+
+def _select(names) -> None:
+    view_layer = bpy.context.view_layer
+    for obj in view_layer.objects:
+        obj.select_set(False)
+    selected = [view_layer.objects.get(n) for n in names]
+    selected = [o for o in selected if o is not None]
+    for obj in selected:
+        obj.select_set(True)
+    if selected:
+        view_layer.objects.active = selected[0]
+
+
+def _open_files():
+    """Timer: import the queued files once the window, the extension and
+    the layout are ready, then frame them. None when done."""
+    global _open_attempts
+    if not _pending_open:
+        return None
+    _open_attempts += 1
+    windows = _windows()
+    ready = bool(windows) and _extension_enabled() and not _layout_pending()
+    if not ready and _open_attempts < MAX_OPEN_ATTEMPTS:
+        return OPEN_INTERVAL
+    paths = list(_pending_open)
+    _pending_open.clear()
+    if not windows:
+        return None
+    if not _extension_enabled():
+        _report_errors([(p, _message("no_extension", name=p)) for p in paths])
+        return None
+    names, errors = import_files(paths)
+    if names:
+        _remove_default_cube()
+        bpy.context.view_layer.update()
+        _select(names)
+        _schedule_frame()
+    if errors:
+        _report_errors(errors)
+    return None
+
+
+def _report_errors(errors) -> None:
+    """Show what could not be opened, in a popup and on the console."""
+    for path, error in errors:
+        print(f"BlenderCraft: {path}: {error}")
+    windows = _windows()
+    if not windows:
+        return
+    lines = []
+    for path, error in errors:
+        name = path.rsplit("/", 1)[-1]
+        lines.append(_message("open_failed", name=name))
+        lines.append(f"    {error}")
+
+    def draw(menu, _context):
+        for line in lines:
+            menu.layout.label(text=line)
+
+    window = windows[0]
+    with bpy.context.temp_override(window=window, screen=window.screen):
+        bpy.context.window_manager.popup_menu(draw, title="BlenderCraft", icon="ERROR")
+
+
+def _view_selected() -> None:
+    bpy.ops.view3d.view_selected()
+
+
+def _frame_selection():
+    """Timer: frame the selection in every 3D View. Runs once."""
+    for window in _windows():
+        screen = window.screen
+        for area in screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            region = next((r for r in area.regions if r.type == "WINDOW"), None)
+            if region is None:
+                continue
+            with _override(window, screen, area, region):
+                _view_selected()
+    return None
+
+
+def _schedule_frame() -> None:
+    # A tick later: the new objects' bounds and the areas' sizes are fresh.
+    if not bpy.app.timers.is_registered(_frame_selection):
+        bpy.app.timers.register(_frame_selection, first_interval=0.3)
+
+
 # show_splash as the user set it, while the template keeps it off.
 _splash_setting = None
 
@@ -414,6 +614,7 @@ def _restore_splash():
 def register() -> None:
     _hide_splash()
     _schedule_enable()
+    _queue_open_args()
     bpy.context.preferences.edit.undo_steps = UNDO_STEPS
     if setup_new_file not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(setup_new_file)
@@ -423,7 +624,14 @@ def register() -> None:
 def unregister() -> None:
     while setup_new_file in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(setup_new_file)
-    for timer in (_tweak_ui, _enable_extension, _restore_splash, _select_assistant_tab):
+    for timer in (
+        _tweak_ui,
+        _enable_extension,
+        _restore_splash,
+        _select_assistant_tab,
+        _open_files,
+        _frame_selection,
+    ):
         if bpy.app.timers.is_registered(timer):
             bpy.app.timers.unregister(timer)
     _restore_splash()
