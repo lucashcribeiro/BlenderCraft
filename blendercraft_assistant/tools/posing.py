@@ -94,9 +94,19 @@ def find_legs(figure: list) -> list[dict]:
         axis_i = "XYZ".index(pivot["bc_axis"])
         axis = (pivot.matrix_world.to_3x3() @ Matrix.Identity(3).col[axis_i]).normalized()
         main = max(meshes, key=lambda o: len(o.data.vertices))
-        legs.append({"name": pivot.name, "mode": "pivot", "pivot": pivot,
-                     "point": pivot.matrix_world.translation.copy(), "axis": axis,
-                     "main": main, "objects": meshes})
+        leg = {"name": pivot.name, "mode": "pivot", "pivot": pivot,
+               "point": pivot.matrix_world.translation.copy(), "axis": axis,
+               "main": main, "objects": meshes}
+        # A joint built by add_joint on a standing figure: its rest (0) is
+        # standing and the outer end of its range is the print pose.
+        try:
+            info = json.loads(pivot.get("bc_joint", "{}"))
+        except (TypeError, ValueError):
+            info = {}
+        rng = info.get("range_deg")
+        if info.get("role") == "leg" and isinstance(rng, list) and len(rng) == 2:
+            leg["print_deg"] = rng[0] if abs(rng[0]) > abs(rng[1]) else rng[1]
+        legs.append(leg)
         taken.update(o.name for o in meshes)
     names = {o.name: o for o in figure}
     for obj in figure:
@@ -122,6 +132,26 @@ def find_legs(figure: list) -> list[dict]:
     return legs
 
 
+def _tip(leg: dict) -> Vector:
+    """Middle of the leg's far end (the paw): the vertices farthest from
+    the hinge axis. Robust to a wide knuckle that moves the centroid."""
+    a, p = leg["axis"], leg["point"]
+    pts = []
+    for obj in leg["objects"]:
+        mw = obj.matrix_world
+        pts.extend(mw @ v.co for v in obj.data.vertices)
+    if not pts:
+        return _centroid(leg["main"])
+
+    def dist(q):
+        r = q - p
+        return (r - a * r.dot(a)).length
+
+    far = max(dist(q) for q in pts)
+    tip = [q for q in pts if dist(q) >= 0.85 * far]
+    return sum(tip, Vector()) / len(tip)
+
+
 def _role(pivot) -> str | None:
     try:
         return json.loads(pivot.get("bc_joint", "{}")).get("role")
@@ -132,8 +162,11 @@ def _role(pivot) -> str | None:
 def _state(leg: dict, centre: Vector) -> tuple[float, float, Vector]:
     """Signed angles (radians) about the hinge axis that bring the leg down
     (standing) and flat outward (print), and the outward direction."""
+    if "print_deg" in leg:
+        current = float(leg["pivot"].get("bc_angle", 0.0))
+        return math.radians(-current), math.radians(leg["print_deg"] - current), Vector()
     a = leg["axis"]
-    d = _centroid(leg["main"]) - leg["point"]
+    d = _tip(leg) - leg["point"]
     d -= a * d.dot(a)
     out = _centroid(leg["main"]) - centre
     out.z = 0.0
