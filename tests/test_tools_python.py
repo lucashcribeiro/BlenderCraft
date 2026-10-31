@@ -11,6 +11,7 @@ import bpy
 
 from blendercraft_assistant import tools
 from blendercraft_assistant.tools.base import REGISTRY, Tool, register_tool
+from blendercraft_assistant.tools import python_exec
 from blendercraft_assistant.tools.dispatch import call_tool
 from blendercraft_assistant.undo import ChangeTracker
 
@@ -29,6 +30,8 @@ def _run(code, description="teste"):
 class RunPythonTest(unittest.TestCase):
     def setUp(self):
         _clear_scene()
+        python_exec.reset_namespace()
+        self.addCleanup(python_exec.reset_namespace)
         # Undo needs a baseline step in background mode.
         bpy.ops.ed.undo_push(message="baseline")
 
@@ -64,11 +67,37 @@ class RunPythonTest(unittest.TestCase):
         self.assertIn("__bc__", res.text)
         self.assertIn("'bpy'", res.text)
 
-    def test_namespace_is_fresh_per_call(self):
+    def test_namespace_persists_between_calls(self):
+        # Real error: "NameError: name 'O' is not defined" right after
+        # defining O in the previous call.
+        self.assertFalse(_run("O = 7\ndef helper(x):\n    return x * O\nimport json").is_error)
+        res = _run("helper(2), json.dumps([O])")
+        self.assertFalse(res.is_error, res.text)
+        self.assertIn("(14, '[7]')", res.text)
+
+    def test_reset_namespace_forgets_user_names_and_keeps_the_seed(self):
         _run("leaked = 1")
+        python_exec.reset_namespace()
         res = _run("leaked")
         self.assertTrue(res.is_error)
         self.assertIn("NameError", res.text)
+        self.assertFalse(_run("[bpy.__name__, Vector, Matrix, math.pi, bmesh, mathutils]").is_error)
+
+    def test_seeded_names_come_back_if_the_code_deletes_them(self):
+        _run("del math\nVector = 3")
+        res = _run("math.floor(2.5)")
+        self.assertFalse(res.is_error, res.text)
+
+    def test_state_survives_an_error_and_system_exit(self):
+        _run("kept = 5")
+        self.assertTrue(_run("1/0").is_error)
+        self.assertTrue(_run("import sys\nsys.exit(3)").is_error)
+        res = _run("kept")
+        self.assertFalse(res.is_error, res.text)
+        self.assertIn("5", res.text)
+
+    def test_description_says_variables_persist(self):
+        self.assertIn("persist between calls", REGISTRY["run_python"].description)
 
     def test_functions_see_their_globals(self):
         # exec with a single namespace: helper functions can call each other.

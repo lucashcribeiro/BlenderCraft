@@ -19,7 +19,7 @@ from .base import Tool, ToolResult, register_tool
 _FILENAME = "<run_python>"
 
 
-def _namespace() -> dict:
+def _seed() -> dict:
     return {
         "__name__": "__bc__",
         "bpy": bpy,
@@ -29,6 +29,25 @@ def _namespace() -> dict:
         "Matrix": Matrix,
         "math": math,
     }
+
+
+# Shared by every run_python call of a conversation, so helpers and variables
+# defined by one call exist in the next. The runtime resets it when a
+# conversation starts, is opened or closed, and when the add-on stops.
+_NAMESPACE: dict = _seed()
+
+
+def reset_namespace() -> None:
+    """Forget what earlier run_python calls defined (new conversation)."""
+    _NAMESPACE.clear()
+    _NAMESPACE.update(_seed())
+
+
+def _namespace() -> dict:
+    # Names the code deleted or overwrote come back; its own stay.
+    for key, value in _seed().items():
+        _NAMESPACE.setdefault(key, value)
+    return _NAMESPACE
 
 
 def _format_error(exc: BaseException) -> str:
@@ -156,8 +175,11 @@ register_tool(
         name="run_python",
         description=(
             "Run Python in Blender's main thread with bpy, bmesh, mathutils, "
-            "Vector, Matrix and math already available (a fresh namespace on "
-            "every call). Returns what the code prints plus the repr of a "
+            "Vector, Matrix and math already available. Variables, functions "
+            "and imports you define persist between calls in the same "
+            "conversation (a new conversation starts clean); after undo, "
+            "look objects up by name again instead of reusing old "
+            "references. Returns what the code prints plus the repr of a "
             "final expression, or the traceback on error. This is the main "
             "modelling tool; each call is one undo step. Lengths are Blender "
             "units: 1 BU = 1 mm in BlenderCraft files, otherwise see "

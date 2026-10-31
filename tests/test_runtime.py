@@ -499,6 +499,40 @@ class RuntimeSessionTest(RuntimeTestBase):
         self.assertIsNone(runtime.session)
         self.assertEqual(runtime.store.list(), [])
 
+    def test_run_python_namespace_is_per_conversation(self):
+        from blendercraft_assistant.tools import python_exec
+
+        def run(code):
+            return python_exec._run_python({"code": code})
+
+        self.addCleanup(python_exec.reset_namespace)
+        claude = self.fake_claude(FIXTURES / "text_turn.jsonl")
+        with mock.patch.object(runtime, "find_claude", return_value=claude):
+            first = runtime.ensure_session()
+            first.send("oi")
+            self.assertTrue(pump_until(lambda: first.status == "IDLE"))
+        first_id = first.conversation.id
+        run("O = 1")
+        # Same conversation (Stop, mode change, more messages): kept.
+        runtime.stop_session()
+        self.assertFalse(run("O").is_error)
+        # New conversation: gone, also before the next message creates it.
+        runtime.new_conversation()
+        self.assertIn("NameError", run("O").text)
+        runtime.ensure_session()
+        run("P = 2")
+        self.assertIn("NameError", run("O").text)
+        # Opening a saved conversation starts clean too.
+        runtime.open_conversation(first_id)
+        self.assertIn("NameError", run("P").text)
+        run("Q = 3")
+        # Deleting the open conversation and stopping the add-on.
+        runtime.delete_conversation(first_id)
+        self.assertIn("NameError", run("Q").text)
+        run("R = 4")
+        runtime.stop()
+        self.assertIn("NameError", run("R").text)
+
 
 if __name__ == "__main__":
     unittest.main()

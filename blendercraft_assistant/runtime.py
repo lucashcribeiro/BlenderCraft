@@ -31,6 +31,7 @@ from .mcp.server import McpServer
 from .tools import load_all
 from .tools.base import REGISTRY, ToolResult, tools_for_mode
 from .tools.dispatch import call_tool
+from .tools.python_exec import reset_namespace
 from .undo import ChangeTracker
 from .units import get_display_unit, mm_per_bu
 
@@ -119,6 +120,7 @@ def stop() -> None:
         except Exception:  # noqa: BLE001 - shutting down regardless
             traceback.print_exc()
         session = None
+    reset_namespace()
     if srv is not None:
         srv.stop()
     token = ""
@@ -340,6 +342,7 @@ def ensure_session() -> AgentSession:
 
 
 def _make_session(conversation) -> AgentSession:
+    reset_namespace()  # run_python variables belong to one conversation
     return AgentSession(
         conversation,
         store,
@@ -360,6 +363,7 @@ def _context_line() -> str:
 def _close_session() -> None:
     global session
     _deny_pending("The user stopped the assistant.")
+    reset_namespace()
     if session is not None:
         session.close()
         session = None
