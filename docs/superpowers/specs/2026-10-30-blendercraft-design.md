@@ -48,7 +48,7 @@ O assistente deve entender o que cada função do Blender faz, ter **olhar de de
 **Ponte Claude Code.** A cada conversa o painel inicia um processo `claude` em modo headless:
 - `--print --input-format stream-json --output-format stream-json --include-partial-messages --verbose` mantém o processo vivo entre mensagens, com texto chegando em streaming;
 - `--mcp-config` aponta para o servidor HTTP local, e `--strict-mcp-config` impede que outros servidores MCP do usuário entrem nessa sessão;
-- `--tools` / `--allowedTools` liberam só as ferramentas do BlenderCraft. As ferramentas embutidas do Claude Code (Bash, Edit, Write, WebFetch etc.) ficam desligadas por padrão *(decisão minha: o agente trabalha na cena, não no disco do usuário; o `run_python` já cobre o que for preciso)*;
+- `--tools Skill` / `--allowedTools` liberam só as ferramentas do BlenderCraft e a ferramenta `Skill`, necessária para usar as skills do plugin. As demais ferramentas embutidas do Claude Code (Bash, Edit, Write, WebFetch etc.) ficam desligadas *(decisão minha: o agente trabalha na cena, não no disco do usuário; o `run_python` já cobre o que for preciso)*;
 - `--plugin-dir` carrega um plugin do BlenderCraft com o conhecimento de designer (ver "Inteligência");
 - `--append-system-prompt` adiciona o contexto da sessão: versão do Blender, unidade atual, idioma e regras de trabalho;
 - `--model` vem do seletor de modelo do painel;
@@ -90,7 +90,7 @@ Aba "Assistente" na barra lateral (região N) da 3D View:
 | **Parar** | Visível enquanto o agente trabalha; interrompe a resposta atual. |
 | Conversa | Mensagens com quebra de linha conforme a largura do painel. O texto chega em **streaming**. O Markdown é simplificado para texto puro. Mostra as últimas mensagens, com "mostrar anteriores". |
 | Chamadas de ferramenta | Uma linha cada: ícone de estado (rodando/ok/erro), nome e resumo. **Detalhes** expande entrada e saída (truncadas). |
-| Campo de mensagem | Uma linha; Enter envia. **Enquanto o agente trabalha, a mensagem vai para a fila.** **Enviar agora** interrompe e envia já. |
+| Campo de mensagem | Uma linha; o botão ▶ (Enviar) envia. Enter só confirma o texto: o Blender confirma um campo de texto do mesmo jeito no Enter e no clique fora dele, então enviar no Enter também enviaria num clique perdido. **Enquanto o agente trabalha, a mensagem vai para a fila.** **Enviar agora** interrompe e envia já. |
 | Anexar vista | Checkbox: inclui um print da viewport na próxima mensagem. |
 | Anexar seleção | Checkbox: inclui nome, tipo, dimensões e vértices/faces dos objetos selecionados. |
 | Modo de permissão | **Automático** (padrão), **Perguntar antes de alterar** (cada ferramenta que modifica mostra Aprovar/Recusar no painel, via `--permission-prompt-tool` apontando para uma ferramenta do nosso MCP) e **Só leitura** (só ferramentas de inspeção são liberadas; `run_python` não é oferecido). |

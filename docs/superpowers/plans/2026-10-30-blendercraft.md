@@ -30,7 +30,7 @@
 - Textos de UI em português e inglês: português se o locale do Blender começar com `pt`, inglês nos demais casos.
 - Chaves e tokens nunca são gravados no `.blend`.
 - O servidor MCP escuta só em `127.0.0.1` e exige `Authorization: Bearer <token>`, com token aleatório por sessão (`secrets.token_urlsafe(32)`).
-- Ferramentas embutidas do Claude Code desligadas (`--tools ""`) e `--strict-mcp-config`.
+- Ferramentas embutidas do Claude Code limitadas à `Skill` (`--tools Skill`), necessária para usar as skills do plugin, e `--strict-mcp-config`.
 - Limite de 40 chamadas de ferramenta por pedido; `undo_steps = 256`.
 - Conversas em `~/Library/Application Support/BlenderCraft/conversations/`.
 - Comando de teste (referido abaixo como `RUN_TESTS`):
@@ -510,7 +510,7 @@ class ClaudeProcess:
     ```
     [claude, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
      "--include-partial-messages", "--verbose", "--mcp-config", <json>, "--strict-mcp-config",
-     "--tools", "", "--append-system-prompt", system_prompt, "--plugin-dir", plugin_dir]
+     "--tools", "Skill", "--append-system-prompt", system_prompt, "--plugin-dir", plugin_dir]
     ```
 
     O `<json>` é `{"mcpServers":{"blendercraft":{"type":"http","url":mcp_url,"headers":{"Authorization":"Bearer "+token}}}}`.
@@ -532,7 +532,7 @@ class ClaudeProcess:
   - `test_text_turn`: concatenar os `TextDelta` não dá vazio; aparecem exatamente um `SessionStarted` e um `TurnFinished(is_error=False)`; nenhum texto duplicado vindo da mensagem `assistant`.
   - `test_tool_turn`: `ToolStarted(name="echo")` seguido de `ToolFinished` com o mesmo `tool_use_id`.
   - `test_invalid_line`: `parse_line("lixo") == []`.
-  - `test_build_args_modes`: confere as flags de cada modo; `--tools` seguido de `""`; JSON do MCP com o header.
+  - `test_build_args_modes`: confere as flags de cada modo; `--tools` seguido de `Skill`; JSON do MCP com o header.
   - `test_find_claude_without_path` (Review Focus 1): com `PATH` vazio e `HOME` temporário contendo `.local/bin/claude` executável, encontra esse caminho; sem nenhum, devolve `None`.
   - `test_process_with_fake`:
     - `tests/fake_claude.py` reproduz uma fixture a cada linha `user` recebida;
