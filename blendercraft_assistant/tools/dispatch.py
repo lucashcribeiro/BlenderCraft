@@ -5,6 +5,7 @@ import traceback
 from contextlib import nullcontext
 from dataclasses import replace
 
+from .. import viewport
 from ..undo import ChangeTracker, push_step
 from .base import REGISTRY, ToolResult, truncate
 
@@ -29,6 +30,8 @@ def scene_step(fn, label: str, tracker: ChangeTracker | None = None):
             push_step(label)
             if tracker is not None:
                 tracker.record_ai_step()
+            viewport.refresh()
+            viewport.mark_dirty()
 
 
 def call_tool(
@@ -69,6 +72,11 @@ def call_tool(
                 )
         if tracker is not None and result.undo_delta:
             tracker.shift_ai_steps(result.undo_delta)
+    if tool.kind != "read":
+        # Changes (even from a failed call: it may have changed things
+        # before raising) must show without waiting for a mouse event.
+        viewport.refresh()
+        viewport.mark_dirty()
     return replace(result, text=truncate(result.text))
 
 

@@ -95,7 +95,10 @@ def pump(max_items: int = 100) -> int:
 
 def _tick() -> float:
     try:
-        pump()
+        if pump():
+            from . import viewport
+
+            viewport.flush_if_dirty()  # after a batch that ran tool calls
     except BaseException:  # noqa: BLE001 - the timer must keep running
         traceback.print_exc()
     return TIMER_INTERVAL
