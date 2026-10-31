@@ -244,7 +244,37 @@ def _schedule_enable() -> None:
         bpy.app.timers.register(_enable_extension, first_interval=ENABLE_INTERVAL, persistent=True)
 
 
+# show_splash as the user set it, while the template keeps it off.
+_splash_setting = None
+
+
+def _hide_splash() -> None:
+    """Turn the splash off for this launch only.
+
+    Blender decides on the splash after the template registers and before
+    the first timer tick, so the user's setting comes back on that tick:
+    the preferences are shared with the stock Blender, which must keep its
+    splash when they are saved."""
+    global _splash_setting
+    view = bpy.context.preferences.view
+    if _splash_setting is None:
+        _splash_setting = view.show_splash
+    view.show_splash = False
+    if not bpy.app.timers.is_registered(_restore_splash):
+        bpy.app.timers.register(_restore_splash, first_interval=0.0, persistent=True)
+
+
+def _restore_splash():
+    """Timer: put the user's show_splash back. Runs once."""
+    global _splash_setting
+    if _splash_setting is not None:
+        bpy.context.preferences.view.show_splash = _splash_setting
+        _splash_setting = None
+    return None
+
+
 def register() -> None:
+    _hide_splash()
     _schedule_enable()
     bpy.context.preferences.edit.undo_steps = UNDO_STEPS
     if setup_new_file not in bpy.app.handlers.load_post:
@@ -255,6 +285,7 @@ def register() -> None:
 def unregister() -> None:
     while setup_new_file in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(setup_new_file)
-    for timer in (_tweak_ui, _enable_extension):
+    for timer in (_tweak_ui, _enable_extension, _restore_splash):
         if bpy.app.timers.is_registered(timer):
             bpy.app.timers.unregister(timer)
+    _restore_splash()

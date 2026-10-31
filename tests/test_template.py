@@ -202,11 +202,53 @@ class RegisterTest(unittest.TestCase):
         fresh_startup_file()
         self.template = load_template()
         self.undo_steps = bpy.context.preferences.edit.undo_steps
+        self.show_splash = bpy.context.preferences.view.show_splash
 
     def tearDown(self):
         bpy.context.preferences.edit.undo_steps = self.undo_steps
         self.template.unregister()
+        bpy.context.preferences.view.show_splash = self.show_splash
         fresh_startup_file()
+
+    def test_register_hides_the_splash_until_the_first_tick(self):
+        view = bpy.context.preferences.view
+        view.show_splash = True
+        with mock.patch("addon_utils.enable"):
+            self.template.register()
+        # Blender decides on the splash after the template registers and
+        # before the first timer tick.
+        self.assertFalse(view.show_splash)
+        self.assertTrue(bpy.app.timers.is_registered(self.template._restore_splash))
+        self.assertIsNone(self.template._restore_splash())
+        # The user's own setting is back, so saving the shared preferences
+        # keeps the splash for the stock Blender.
+        self.assertTrue(view.show_splash)
+
+    def test_splash_setting_survives_a_second_register(self):
+        view = bpy.context.preferences.view
+        view.show_splash = True
+        with mock.patch("addon_utils.enable"):
+            self.template.register()
+            self.template.register()
+        self.template._restore_splash()
+        self.assertTrue(view.show_splash)
+
+    def test_splash_off_stays_off(self):
+        view = bpy.context.preferences.view
+        view.show_splash = False
+        with mock.patch("addon_utils.enable"):
+            self.template.register()
+        self.template._restore_splash()
+        self.assertFalse(view.show_splash)
+
+    def test_unregister_restores_the_splash_setting(self):
+        view = bpy.context.preferences.view
+        view.show_splash = True
+        with mock.patch("addon_utils.enable"):
+            self.template.register()
+        self.template.unregister()
+        self.assertTrue(view.show_splash)
+        self.assertFalse(bpy.app.timers.is_registered(self.template._restore_splash))
 
     def test_register_unregister(self):
         with mock.patch("addon_utils.enable") as enable:
