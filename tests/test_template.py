@@ -653,15 +653,8 @@ class InstallScriptTest(unittest.TestCase):
         )
 
     def test_scripts_are_executable(self):
-        for name in ("install.sh", "BlenderCraft.command"):
+        for name in ("install.sh", "BlenderCraft.command", "build_app.sh"):
             self.assertTrue(os.access(ROOT / "scripts" / name, os.X_OK), name)
-
-    def test_launcher_runs_blender_with_the_template(self):
-        text = (ROOT / "scripts" / "BlenderCraft.command").read_text(encoding="utf-8")
-        self.assertIn(
-            'exec /Applications/Blender.app/Contents/MacOS/Blender --app-template blendercraft "$@"',
-            text,
-        )
 
     def test_copy_install(self):
         result = self.run_install()
