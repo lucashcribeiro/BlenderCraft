@@ -346,16 +346,18 @@ class RegisterTest(unittest.TestCase):
 
 
 class _Recorder:
-    """Stands in for temp_override and area_close and notes when they ran."""
+    """Stands in for temp_override and the screen operators and notes when they ran."""
 
     def __init__(self):
         self.current_area = None
         self.depth = 0
         self.closes = []  # context depth at each area_close
+        self.splits = []  # (direction, factor, context depth)
         self.sets = []  # (property, value, context depth)
+        self.windows = []
 
     @contextlib.contextmanager
-    def override(self, window, screen, area):
+    def override(self, window, screen, area, region=None):
         self.current_area = area
         self.depth += 1
         try:
@@ -364,12 +366,21 @@ class _Recorder:
             self.depth -= 1
             self.current_area = None
 
+    def _screen_of(self, area):
+        return next(w.screen for w in self.windows if area in w.screen.areas)
+
     def area_close(self):
-        self.closes.append(self.depth)
         area = self.current_area
-        screens = [w.screen for w in self.windows if area in w.screen.areas]
-        for screen in screens:
-            screen.areas.remove(area)
+        self.closes.append(self.depth)
+        self._screen_of(area).areas.remove(area)
+
+    def area_split(self, direction, factor):
+        """Like Blender: the new area takes the left (or bottom) part."""
+        area = self.current_area
+        self.splits.append((direction, round(factor, 4), self.depth))
+        screen = self._screen_of(area)
+        new = _stub_area(self, area.type, area.ui_type)
+        screen.areas.insert(screen.areas.index(area), new)
 
 
 class _Recording:
@@ -383,24 +394,53 @@ class _Recording:
     def __setattr__(self, name, value):
         self._recorder.sets.append((name, value, self._recorder.depth))
         object.__setattr__(self, name, value)
+        if name == "ui_type":  # changing the editor changes the area type
+            object.__setattr__(self, "type", value)
 
 
 def _Space(recorder, kind):
     return _Recording(recorder, type=kind, region_3d=_Recording(recorder))
 
 
-def _stub_area(recorder, kind, ui_type=None):
+def _stub_area(recorder, kind, ui_type=None, x=0, width=100):
     ui_type = ui_type or kind
-    return types.SimpleNamespace(
-        type=kind, ui_type=ui_type, spaces=[_Space(recorder, kind)]
+    return _Recording(
+        recorder,
+        type=kind,
+        ui_type=ui_type,
+        x=x,
+        width=width,
+        spaces=[_Space(recorder, kind)],
+        regions=[
+            _Recording(recorder, type="WINDOW"),
+            _Recording(
+                recorder,
+                type="UI",
+                active_panel_category="Item",
+                is_property_readonly=lambda name: False,
+            ),
+        ],
     )
 
 
-def _stub_window(workspace, areas):
+def _stub_window(workspace, areas, width=2560):
     return types.SimpleNamespace(
         workspace=types.SimpleNamespace(name=workspace),
         screen=types.SimpleNamespace(areas=list(areas)),
+        width=width,
     )
+
+
+def _factory_layout(rec):
+    """Blender's Layout: Outliner over Properties on the right, timeline below."""
+    view = _stub_area(rec, "VIEW_3D", x=2, width=2100)
+    areas = [
+        _stub_area(rec, "PROPERTIES", x=2105, width=453),
+        _stub_area(rec, "OUTLINER", x=2105, width=453),
+        _stub_area(rec, "DOPESHEET_EDITOR", "TIMELINE", x=2, width=2100),
+        view,
+    ]
+    return view, areas
 
 
 class TweakUiGuiBranchTest(unittest.TestCase):
@@ -413,29 +453,138 @@ class TweakUiGuiBranchTest(unittest.TestCase):
     def setUp(self):
         self.template = load_template()
         self.rec = _Recorder()
+        self.category = "Assistente"
+        self.ui_scale = 1.0
 
-    def run_tweak(self, windows, unsaved=True):
+    def run_tweak(self, windows, unsaved=True, tab=False):
         self.rec.windows = windows
         with mock.patch.object(self.template, "_windows", return_value=windows), mock.patch.object(
             self.template, "_override", self.rec.override
         ), mock.patch.object(self.template, "_area_close", self.rec.area_close), mock.patch.object(
+            self.template, "_area_split", self.rec.area_split
+        ), mock.patch.object(
             self.template, "_unsaved", return_value=unsaved
+        ), mock.patch.object(
+            self.template, "assistant_category", side_effect=lambda: self.category
+        ), mock.patch.object(
+            self.template, "_ui_scale", side_effect=lambda: self.ui_scale
+        ), mock.patch.object(
+            self.template, "_schedule_tab", side_effect=lambda: self.rec.sets.append(("tab", None, 0))
         ):
+            if tab:
+                return self.template._select_assistant_tab()
             return self.template._tweak_ui()
 
-    def test_layout_gets_sidebar_and_no_timeline_inside_the_override(self):
-        view = _stub_area(self.rec, "VIEW_3D")
-        timeline = _stub_area(self.rec, "DOPESHEET_EDITOR", "TIMELINE")
-        other = _stub_area(self.rec, "OUTLINER")
-        window = _stub_window("Layout", [other, timeline, view])
+    def tab_scheduled(self):
+        return ("tab", None, 0) in self.rec.sets
+
+    def ui_region(self, area):
+        return next(r for r in area.regions if r.type == "UI")
+
+    def test_solidcraft_like_layout_inside_the_override(self):
+        view, areas = _factory_layout(self.rec)
+        window = _stub_window("Layout", areas)
         self.assertIsNone(self.run_tweak([window]))
-        self.assertEqual(window.screen.areas, [other, view])
-        self.assertEqual(self.rec.closes, [1])
+        # Browser (Outliner) over Properties on the left, then the 3D View:
+        # the first split's new area (left) became the Outliner and the
+        # second's (its bottom part) the Properties.
         self.assertEqual(
-            self.rec.sets,
-            [("show_region_ui", True, 1), ("view_distance", self.template.VIEW_DISTANCE, 1)],
+            sorted(a.type for a in window.screen.areas), ["OUTLINER", "PROPERTIES", "VIEW_3D"]
         )
+        self.assertEqual(
+            [(n, v) for n, v, _ in self.rec.sets if n == "ui_type"],
+            [("ui_type", "OUTLINER"), ("ui_type", "PROPERTIES")],
+        )
+        self.assertEqual([a for a in window.screen.areas if a.type == "VIEW_3D"], [view])
+        # Timeline, then the right-hand Properties and Outliner.
+        self.assertEqual(self.rec.closes, [1, 1, 1])
+        self.assertEqual(
+            self.rec.splits,
+            [("VERTICAL", round(320 / 2560, 4), 1), ("HORIZONTAL", 0.4, 1)],
+        )
+        # The Assistant tab is chosen on a later tick, once the sidebar exists.
+        self.assertTrue(self.tab_scheduled())
+        self.rec.sets.remove(("tab", None, 0))
+        # Every UI change ran inside the override.
+        self.assertTrue(self.rec.sets)
+        self.assertTrue(all(depth == 1 for _, _, depth in self.rec.sets), self.rec.sets)
+        space = view.spaces[0]
+        self.assertTrue(space.show_region_ui)
+        self.assertEqual(space.region_3d.view_distance, self.template.VIEW_DISTANCE)
         self.assertEqual(self.template.VIEW_DISTANCE, 80.0)
+        self.assertEqual(self.ui_region(view).active_panel_category, "Item")
+        self.assertIsNone(self.run_tweak([window], tab=True))
+        self.assertEqual(self.ui_region(view).active_panel_category, "Assistente")
+        self.assertEqual(self.rec.sets[-1], ("active_panel_category", "Assistente", 1))
+
+    def test_tab_waits_until_the_sidebar_has_its_tabs(self):
+        view, areas = _factory_layout(self.rec)
+        window = _stub_window("Layout", areas)
+        region = self.ui_region(view)
+        object.__setattr__(region, "is_property_readonly", lambda name: True)
+        self.template._tab_attempts = 0
+        self.assertEqual(self.run_tweak([window], tab=True), self.template.TAB_INTERVAL)
+        self.assertEqual(region.active_panel_category, "Item")
+        object.__setattr__(region, "is_property_readonly", lambda name: False)
+        self.assertIsNone(self.run_tweak([window], tab=True))
+        self.assertEqual(region.active_panel_category, "Assistente")
+
+    def test_tab_gives_up_after_the_retries(self):
+        view, areas = _factory_layout(self.rec)
+        object.__setattr__(self.ui_region(view), "is_property_readonly", lambda name: True)
+        self.template._tab_attempts = self.template.MAX_TAB_ATTEMPTS - 1
+        self.assertIsNone(self.run_tweak([_stub_window("Layout", areas)], tab=True))
+
+    def test_left_column_scales_with_the_interface(self):
+        _, areas = _factory_layout(self.rec)
+        self.ui_scale = 2.0
+        self.run_tweak([_stub_window("Layout", areas, width=2880)])
+        self.assertEqual(self.rec.splits[0][:2], ("VERTICAL", round(640 / 2880, 4)))
+
+    def test_left_column_factor_is_clamped(self):
+        factor = self.template.left_column_factor
+        self.assertAlmostEqual(factor(10000, 1.0), 0.1)
+        self.assertAlmostEqual(factor(800, 2.0), 0.4)
+        self.assertAlmostEqual(factor(0, 1.0), 0.2)
+
+    def test_a_layout_without_the_right_column_is_not_split(self):
+        view = _stub_area(self.rec, "VIEW_3D", x=330, width=2228)
+        browser = _stub_area(self.rec, "OUTLINER", x=2, width=320)
+        window = _stub_window("Layout", [browser, view])
+        self.run_tweak([window])
+        self.assertEqual(self.rec.closes, [])
+        self.assertEqual(self.rec.splits, [])
+        self.assertEqual([a.type for a in window.screen.areas], ["OUTLINER", "VIEW_3D"])
+        self.assertTrue(view.spaces[0].show_region_ui)
+
+    def test_right_column_areas(self):
+        view, areas = _factory_layout(self.rec)
+        screen = types.SimpleNamespace(areas=areas)
+        self.assertEqual(
+            [a.type for a in self.template.right_column_areas(screen, view)],
+            ["PROPERTIES", "OUTLINER"],
+        )
+
+    def test_waits_for_the_assistant_panel(self):
+        _, areas = _factory_layout(self.rec)
+        window = _stub_window("Layout", areas)
+        self.category = None
+        self.template._attempts = 0
+        self.assertEqual(self.run_tweak([window]), self.template.RETRY_INTERVAL)
+        self.assertEqual(self.rec.closes, [])
+        self.assertEqual(self.rec.sets, [])
+
+    def test_lays_out_without_the_panel_after_the_retries(self):
+        view, areas = _factory_layout(self.rec)
+        window = _stub_window("Layout", areas)
+        self.category = None
+        self.template._attempts = self.template.MAX_ATTEMPTS - 1
+        self.assertIsNone(self.run_tweak([window]))
+        self.assertEqual(
+            sorted(a.type for a in window.screen.areas), ["OUTLINER", "PROPERTIES", "VIEW_3D"]
+        )
+        self.assertEqual(self.ui_region(view).active_panel_category, "Item")
+        self.assertFalse(self.tab_scheduled())
 
     def test_every_timeline_is_closed(self):
         timelines = [_stub_area(self.rec, "DOPESHEET_EDITOR", "TIMELINE") for _ in range(3)]
@@ -450,7 +599,9 @@ class TweakUiGuiBranchTest(unittest.TestCase):
         self.rec.windows = [window]
         with mock.patch.object(self.template, "_windows", return_value=[window]), mock.patch.object(
             self.template, "_override", self.rec.override
-        ), mock.patch.object(self.template, "_area_close", lambda: self.rec.closes.append(1)):
+        ), mock.patch.object(self.template, "_area_close", lambda: self.rec.closes.append(1)), mock.patch.object(
+            self.template, "assistant_category", return_value="Assistente"
+        ):
             self.template._tweak_ui()
         self.assertLessEqual(len(self.rec.closes), self.template.MAX_CLOSES)
 
@@ -464,10 +615,10 @@ class TweakUiGuiBranchTest(unittest.TestCase):
         self.assertEqual(self.rec.sets, [])
 
     def test_named_files_are_skipped(self):
-        timeline = _stub_area(self.rec, "DOPESHEET_EDITOR", "TIMELINE")
-        window = _stub_window("Layout", [timeline, _stub_area(self.rec, "VIEW_3D")])
+        _, areas = _factory_layout(self.rec)
+        window = _stub_window("Layout", areas)
         self.assertIsNone(self.run_tweak([window], unsaved=False))
-        self.assertIn(timeline, window.screen.areas)
+        self.assertEqual(window.screen.areas, areas)
         self.assertEqual(self.rec.closes, [])
         self.assertEqual(self.rec.sets, [])
 

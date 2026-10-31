@@ -1,9 +1,12 @@
 """BlenderCraft application template.
 
-Enables the BlenderCraft Assistant extension, tunes the preferences and sets
-up every new, unsaved file: 1 BU = 1 mm, a 20 mm default cube (camera and light moved with it) and no
-Animation workspace or timeline. Files that already have a name keep their
-own workspaces and units.
+Enables the BlenderCraft Assistant extension, tunes the preferences, hides
+the splash for this launch and sets up every new, unsaved file: 1 BU = 1 mm,
+a 20 mm default cube (camera and light moved with it), no Animation
+workspace or timeline, and a SolidCraft-like Layout: Browser (Outliner) over
+Properties on the left, the 3D View up to the right edge with the Assistant
+tab open in its sidebar. Files that already have a name keep their own
+workspaces, layout and units.
 
 Nothing from the extension is imported at module level, so this module also
 loads in background mode without the extension installed.
@@ -25,6 +28,15 @@ MAX_CLOSES = 8
 # The default view distance (10 BU) is a 10 mm window; 80 mm frames the 20 mm cube.
 VIEW_DISTANCE = 80.0
 _attempts = 0
+
+# SolidCraft-like layout: Browser over Properties on the left, 60/40.
+LEFT_COLUMN_WIDTH = 320  # pixels at ui_scale 1
+PROPERTIES_SHARE = 0.4
+SIDE_EDITORS = ("OUTLINER", "PROPERTIES")
+ASSISTANT_PANEL = "VIEW3D_PT_bc_assistant"
+TAB_INTERVAL = 0.2
+MAX_TAB_ATTEMPTS = 25
+_tab_attempts = 0
 
 # Enabling the extension waits for bl_pkg and the extension repositories.
 ENABLE_INTERVAL = 0.25
@@ -149,14 +161,49 @@ def _unsaved() -> bool:
     return bpy.data.filepath == ""
 
 
-def _override(window, screen, area):
+def _override(window, screen, area, region=None):
     """Context for UI changes. Without a window context some of them crash
     Blender 5.2 (show_region_ui goes through ED_area_init)."""
-    return bpy.context.temp_override(window=window, screen=screen, area=area)
+    if region is None:
+        return bpy.context.temp_override(window=window, screen=screen, area=area)
+    return bpy.context.temp_override(window=window, screen=screen, area=area, region=region)
 
 
 def _area_close() -> None:
     bpy.ops.screen.area_close()
+
+
+def _area_split(direction: str, factor: float) -> None:
+    bpy.ops.screen.area_split(direction=direction, factor=factor)
+
+
+def _ui_scale() -> float:
+    return bpy.context.preferences.system.ui_scale
+
+
+def assistant_category():
+    """Sidebar tab of the Assistant panel (translated by the extension), or
+    None while the extension is not enabled."""
+    panel = getattr(bpy.types, ASSISTANT_PANEL, None)
+    return getattr(panel, "bl_category", None) if panel is not None else None
+
+
+def left_column_factor(window_width: int, ui_scale: float) -> float:
+    """Share of the window for the left column (Browser and Properties)."""
+    if window_width <= 0:
+        return 0.2
+    return min(0.4, max(0.1, LEFT_COLUMN_WIDTH * ui_scale / window_width))
+
+
+def right_column_areas(screen, view) -> list:
+    """Outliner and Properties areas to the right of the 3D View (Blender's
+    default Layout keeps them there)."""
+    edge = view.x + view.width
+    return [a for a in screen.areas if a.type in SIDE_EDITORS and a.x >= edge]
+
+
+def _view_area(screen):
+    return next((a for a in screen.areas if a.type == "VIEW_3D"), None)
 
 
 def _close_timelines(window, screen) -> None:
@@ -169,7 +216,53 @@ def _close_timelines(window, screen) -> None:
             _area_close()
 
 
+def _split(window, screen, area, direction: str, factor: float):
+    """Split area and return the new one: the left (VERTICAL) or bottom
+    (HORIZONTAL) part, ``factor`` of the size. Area coordinates are stale
+    until the next redraw, so the new area is found by elimination."""
+    before = list(screen.areas)
+    with _override(window, screen, area):
+        _area_split(direction, factor)
+    new = [a for a in screen.areas if a not in before]
+    return new[0] if new else None
+
+
+def _set_editor(window, screen, area, ui_type: str) -> None:
+    with _override(window, screen, area):
+        area.ui_type = ui_type
+
+
+def _move_side_column_left(window, screen) -> None:
+    """SolidCraft-like: the Browser (Outliner) over Properties on the left,
+    and the 3D View reaching the right edge of the window."""
+    view = _view_area(screen)
+    if view is None:
+        return
+    right = right_column_areas(screen, view)
+    if not right:
+        return  # already laid out
+    for area in right:
+        with _override(window, screen, area):
+            _area_close()
+    view = _view_area(screen)
+    if view is None:
+        return
+    factor = left_column_factor(window.width, _ui_scale())
+    browser = _split(window, screen, view, "VERTICAL", factor)
+    if browser is None:
+        return
+    _set_editor(window, screen, browser, "OUTLINER")
+    properties = _split(window, screen, browser, "HORIZONTAL", PROPERTIES_SHARE)
+    if properties is not None:
+        _set_editor(window, screen, properties, "PROPERTIES")
+
+
 def _open_sidebar(window, screen) -> None:
+    """Open the 3D View sidebar and frame the cube.
+
+    The sidebar overlaps the viewport (region overlap) like SolidCraft's
+    chat. Its width has no Python API in Blender 5.2 (Region.width is read
+    only and screen.region_scale is interactive only)."""
     for area in screen.areas:
         if area.type != "VIEW_3D":
             continue
@@ -181,20 +274,65 @@ def _open_sidebar(window, screen) -> None:
 
 
 def _tweak_ui():
-    """Timer: close the Layout timeline, open the sidebar and frame the cube. None when done."""
+    """Timer: lay out the Layout workspace of a new file. None when done.
+
+    Waits for a window and for the Assistant panel (its tab is opened), up to
+    MAX_ATTEMPTS ticks; without the panel the rest is still done."""
     global _attempts
     if not _unsaved():
         return None
     windows = _windows()
-    if not windows:
-        _attempts += 1
-        return RETRY_INTERVAL if _attempts < MAX_ATTEMPTS else None
-    for window in windows:
+    category = assistant_category()
+    _attempts += 1
+    if (not windows or category is None) and _attempts < MAX_ATTEMPTS:
+        return RETRY_INTERVAL
+    layouts = [w for w in windows if w.workspace.name == "Layout"]
+    for window in layouts:
+        screen = window.screen
+        _close_timelines(window, screen)
+        _move_side_column_left(window, screen)
+        _open_sidebar(window, screen)
+    if layouts and category is not None:
+        _schedule_tab()
+    return None
+
+
+def _select_assistant_tab():
+    """Timer: show the Assistant tab in the 3D View sidebar. None when done.
+
+    active_panel_category is read only until the sidebar has been drawn with
+    its tabs, so this waits for that, up to MAX_TAB_ATTEMPTS ticks."""
+    global _tab_attempts
+    category = assistant_category()
+    if not _unsaved() or category is None:
+        return None
+    pending = False
+    for window in _windows():
         if window.workspace.name != "Layout":
             continue
-        _close_timelines(window, window.screen)
-        _open_sidebar(window, window.screen)
+        screen = window.screen
+        for area in screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            for region in area.regions:
+                if region.type != "UI" or region.active_panel_category == category:
+                    continue
+                if region.is_property_readonly("active_panel_category"):
+                    pending = True
+                    continue
+                with _override(window, screen, area, region):
+                    region.active_panel_category = category
+    _tab_attempts += 1
+    if pending and _tab_attempts < MAX_TAB_ATTEMPTS:
+        return TAB_INTERVAL
     return None
+
+
+def _schedule_tab() -> None:
+    global _tab_attempts
+    _tab_attempts = 0
+    if not bpy.app.timers.is_registered(_select_assistant_tab):
+        bpy.app.timers.register(_select_assistant_tab, first_interval=TAB_INTERVAL)
 
 
 def _schedule_ui_tweaks() -> None:
@@ -285,7 +423,7 @@ def register() -> None:
 def unregister() -> None:
     while setup_new_file in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(setup_new_file)
-    for timer in (_tweak_ui, _enable_extension, _restore_splash):
+    for timer in (_tweak_ui, _enable_extension, _restore_splash, _select_assistant_tab):
         if bpy.app.timers.is_registered(timer):
             bpy.app.timers.unregister(timer)
     _restore_splash()
