@@ -37,18 +37,25 @@ def _link(name, bm):
     return obj
 
 
-def _puppy(name="Puppy"):
-    """Body capsule along Y, head at -Y, four legs standing on Z = 0, tail."""
-    body = articulate._cylinder_bm(Vector((0, -11, 18)), Vector((0, 11, 18)), 10.0)
+def _puppy(name="Puppy", s=1.0):
+    """Body capsule along Y, head at -Y, four legs standing on Z = 0, tail.
+    s scales the whole figure."""
+
+    def v(x, y, z):
+        return Vector((x * s, y * s, z * s))
+
+    # The cylinder stops short of the end spheres' centres: no coincident
+    # rings, which EXACT booleans handle badly.
+    body = articulate._cylinder_bm(v(0, -10.5, 18), v(0, 10.5, 18), 10.0 * s)
     parts = [
-        articulate._sphere_bm(Vector((0, -11, 18)), 10.0),
-        articulate._sphere_bm(Vector((0, 11, 18)), 10.0),
-        articulate._sphere_bm(Vector((0, -19, 26)), 7.5),
-        articulate._cylinder_bm(Vector((0, 17, 20)), Vector((0, 23, 24)), 1.6),
+        articulate._sphere_bm(v(0, -11, 18), 10.0 * s),
+        articulate._sphere_bm(v(0, 11, 18), 10.0 * s),
+        articulate._sphere_bm(v(0, -19, 26), 7.5 * s),
+        articulate._cylinder_bm(v(0, 17, 20), v(0, 23, 24), 1.6 * s),
     ]
     for x in (-3.5, 3.5):
         for y in (-8.0, 8.0):
-            parts.append(articulate._cylinder_bm(Vector((x, y, 0)), Vector((x, y, 14)), 2.8))
+            parts.append(articulate._cylinder_bm(v(x, y, 0), v(x, y, 14), 2.8 * s))
     obj = _link(name, body)
     articulate._boolean(obj, "UNION", parts)
     for b in parts:
