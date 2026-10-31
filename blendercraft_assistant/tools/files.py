@@ -2,7 +2,7 @@
 
 Exports for slicers (STL, OBJ, PLY, 3MF) are always in millimeters, whatever
 the scene's unit scale or display unit. Imports of the same formats assume
-the file is in millimeters.
+the file is in millimeters (3MF and SolidCraft .sc declare their own unit).
 """
 
 from contextlib import contextmanager
@@ -12,12 +12,13 @@ import bpy
 from mathutils import Matrix
 
 from ..io_3mf import export_3mf, import_3mf
+from ..io_solidcraft import import_sc
 from ..units import mm_per_bu
 from . import paths
 from .base import Tool, json_result, register_tool
 from .inspect import _get_object
 
-IMPORT_EXTENSIONS = (".stl", ".obj", ".ply", ".glb", ".gltf", ".3mf")
+IMPORT_EXTENSIONS = (".stl", ".obj", ".ply", ".glb", ".gltf", ".3mf", ".sc")
 EXPORT_FORMATS = ("stl", "obj", "ply", "glb", "gltf", "3mf")
 
 
@@ -269,6 +270,8 @@ def _import_file(args: dict):
     before = set(bpy.data.objects.keys())
     if fmt == "3mf":
         created = import_3mf(str(path), mm)
+    elif fmt == "sc":
+        created = import_sc(str(path), mm)
     else:
         _import_with_operator("glb" if fmt == "gltf" else fmt, path, mm)
         created = [o for o in bpy.data.objects if o.name not in before]
@@ -276,20 +279,23 @@ def _import_file(args: dict):
     bpy.context.view_layer.update()
     # The importers disagree about selection; leave the new objects selected.
     _select_only(created, strict=False)
-    return json_result(
-        {
-            "path": str(path),
-            "format": fmt,
-            "objects": [
-                {
-                    "name": o.name,
-                    "type": o.type,
-                    "dimensions_mm": [round(d * mm, 3) for d in o.dimensions],
-                }
-                for o in created
-            ],
-        }
-    )
+    data = {
+        "path": str(path),
+        "format": fmt,
+        "objects": [
+            {
+                "name": o.name,
+                "type": o.type,
+                "dimensions_mm": [round(d * mm, 3) for d in o.dimensions],
+            }
+            for o in created
+        ],
+    }
+    if fmt == "sc":
+        # One collection per project; hidden bodies are reference geometry.
+        data["collection"] = created[0].users_collection[0].name
+        data["hidden"] = [o.name for o in created if o.hide_get()]
+    return json_result(data)
 
 
 register_tool(
@@ -297,10 +303,14 @@ register_tool(
         name="import_file",
         description=(
             "Import a mesh file into the scene: .stl, .obj, .ply, .glb, .gltf "
-            "or .3mf. STL, OBJ and PLY are assumed to be in millimeters; 3MF "
-            "uses the unit declared in the file; glTF is in meters. Sizes "
-            "are converted to the scene's units. The new objects are "
-            "selected. Returns their names and dimensions in mm."
+            "or .3mf, or a SolidCraft project (.sc: one object per component "
+            "body, named like in SolidCraft, grouped in a collection, "
+            "colored and placed as in the project; bodies hidden in "
+            "SolidCraft are imported hidden). STL, OBJ and PLY are assumed "
+            "to be in millimeters; 3MF and SolidCraft use the unit declared "
+            "in the file; glTF is in meters. Sizes are converted to the "
+            "scene's units. The new objects are selected. Returns their "
+            "names and dimensions in mm."
             + paths.RULE
         ),
         input_schema={

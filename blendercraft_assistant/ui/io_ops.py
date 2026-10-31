@@ -1,4 +1,5 @@
-"""File > Open model…, File > Import/Export 3MF and drag-and-drop of .3mf.
+"""File > Open model…, File > Import/Export 3MF, File > Import SolidCraft
+and drag-and-drop of .3mf and .sc.
 
 3MF goes through io_3mf (files in millimeters, converted with mm_per_bu).
 STL needs nothing here: Blender's own STL importer reads 1 file unit as
@@ -14,9 +15,10 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 from ..i18n import t
 from ..io_3mf import export_3mf, import_3mf
+from ..io_solidcraft import import_sc
 from ..units import mm_per_bu
 
-MODEL_EXTENSIONS = (".stl", ".3mf", ".obj", ".ply", ".glb", ".gltf")
+MODEL_EXTENSIONS = (".stl", ".3mf", ".obj", ".ply", ".glb", ".gltf", ".sc")
 
 
 def export_candidates(context) -> list:
@@ -94,6 +96,51 @@ class BC_OT_import_3mf(Operator, ImportHelper):
         return {"FINISHED"}
 
 
+class BC_OT_import_sc(Operator, ImportHelper):
+    """File > Import > SolidCraft (.sc): one object per component body, in a
+    collection named after the project, at the right size."""
+
+    bl_idname = "bc.import_sc"
+    bl_label = t("import_sc")
+    bl_description = t("import_sc")
+    bl_options = {"REGISTER", "UNDO"}
+
+    filename_ext = ".sc"
+    filter_glob: StringProperty(default="*.sc", options={"HIDDEN"})
+    filepath: StringProperty(subtype="FILE_PATH", options={"HIDDEN", "SKIP_SAVE"})
+    directory: StringProperty(subtype="DIR_PATH", options={"HIDDEN", "SKIP_SAVE"})
+    files: CollectionProperty(type=OperatorFileListElement, options={"HIDDEN", "SKIP_SAVE"})
+
+    _paths = BC_OT_import_3mf._paths
+
+    def invoke(self, context, event):
+        if self._paths():
+            return self.execute(context)
+        return ImportHelper.invoke(self, context, event)
+
+    def execute(self, context):
+        paths = self._paths()
+        if not paths:
+            return {"CANCELLED"}
+        mm = mm_per_bu(context.scene)
+        created = []
+        for path in paths:
+            try:
+                created += import_sc(path, mm)
+            except Exception as exc:  # noqa: BLE001 - bad zip, JSON or blob
+                self.report({"ERROR"}, f"{os.path.basename(path)}: {exc}")
+                return {"CANCELLED"}
+        for obj in context.view_layer.objects:
+            obj.select_set(False)
+        shown = [o for o in created if o.visible_get()]
+        for obj in shown:
+            obj.select_set(True)
+        if shown:
+            context.view_layer.objects.active = shown[0]
+        self.report({"INFO"}, t("imported_sc", n=len(created)))
+        return {"FINISHED"}
+
+
 class BC_OT_export_3mf(Operator, ExportHelper):
     bl_idname = "bc.export_3mf"
     bl_label = t("export_3mf")
@@ -131,7 +178,7 @@ def _frame_selected(context) -> None:
 
 
 class BC_OT_open_model(Operator, ImportHelper):
-    """File > Open model…: STL, 3MF, OBJ, PLY and glTF into the current
+    """File > Open model…: STL, 3MF, OBJ, PLY, glTF and SolidCraft into the current
     scene, at the right size (the same import as the assistant's
     import_file tool). File > Open itself only reads .blend files."""
 
@@ -175,7 +222,8 @@ class BC_OT_open_model(Operator, ImportHelper):
         for obj in created:
             if context.view_layer.objects.get(obj.name) is obj:
                 obj.select_set(True)
-        context.view_layer.objects.active = created[0]
+        shown = [o for o in created if context.view_layer.objects.get(o.name) is o and o.visible_get()]
+        context.view_layer.objects.active = (shown or created)[0]
         _frame_selected(context)
         if errors:
             self.report({"WARNING"}, "\n".join(errors))
@@ -261,15 +309,40 @@ class IO_FH_bc_3mf(FileHandler):
         return area is not None and area.type == "VIEW_3D"
 
 
+class IO_FH_bc_sc(FileHandler):
+    """Dropping .sc (SolidCraft) files on the 3D View imports them."""
+
+    bl_idname = "IO_FH_bc_sc"
+    bl_label = "SolidCraft"
+    bl_import_operator = "bc.import_sc"
+    bl_file_extensions = ".sc"
+
+    @classmethod
+    def poll_drop(cls, context):
+        area = context.area
+        return area is not None and area.type == "VIEW_3D"
+
+
 def menu_import(self, context) -> None:
     self.layout.operator("bc.import_3mf", text=t("menu_3mf"))
+
+
+def menu_import_sc(self, context) -> None:
+    self.layout.operator("bc.import_sc", text=t("menu_sc"))
 
 
 def menu_export(self, context) -> None:
     self.layout.operator("bc.export_3mf", text=t("menu_3mf"))
 
 
-CLASSES = (BC_OT_import_3mf, BC_OT_export_3mf, BC_OT_open_model, IO_FH_bc_3mf)
+CLASSES = (
+    BC_OT_import_3mf,
+    BC_OT_import_sc,
+    BC_OT_export_3mf,
+    BC_OT_open_model,
+    IO_FH_bc_3mf,
+    IO_FH_bc_sc,
+)
 
 
 def register() -> None:
@@ -277,6 +350,7 @@ def register() -> None:
         bpy.utils.register_class(cls)
     for menu, fn in (
         (bpy.types.TOPBAR_MT_file_import, menu_import),
+        (bpy.types.TOPBAR_MT_file_import, menu_import_sc),
         (bpy.types.TOPBAR_MT_file_export, menu_export),
     ):
         menu.remove(fn)
@@ -287,6 +361,7 @@ def register() -> None:
 def unregister() -> None:
     _unwrap_file_menu()
     bpy.types.TOPBAR_MT_file_import.remove(menu_import)
+    bpy.types.TOPBAR_MT_file_import.remove(menu_import_sc)
     bpy.types.TOPBAR_MT_file_export.remove(menu_export)
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
