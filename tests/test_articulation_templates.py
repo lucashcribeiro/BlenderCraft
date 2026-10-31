@@ -88,11 +88,12 @@ class TemplateTest(unittest.TestCase):
         self.assertFalse(result.is_error, result.text)
         self.assertAlmostEqual(plan["scale"], 50.25 / 28.0, places=2)
         ids = [(s["op"], s["id"]) for s in plan["steps"]]
-        self.assertEqual(ids[:2], [("cut", "waist"), ("joint", "waist")])
+        self.assertEqual(ids[0], ("cut", "waist"))
+        self.assertEqual(ids[-1], ("joint", "waist"))
         self.assertEqual(len(ids), 10, plan["notes"])
         self.assertTrue(plan["helpers"])
         self.assertIn("BC_Plano", bpy.data.collections)
-        waist_ball = plan["steps"][1]
+        waist_ball = plan["steps"][-1]
         self.assertEqual(waist_ball["size_mm"], 12.0)  # 7.0 x 1.79 clamped to 12
         self.assertEqual(plan["steps"][0]["gap_mm"], 2.0)  # 1.3 x 1.79 clamped to 2
         for step in plan["steps"]:
@@ -106,15 +107,15 @@ class TemplateTest(unittest.TestCase):
                 self.assertEqual(step["axis"], [0.0, 1.0, 0.0])
                 # Outward is +90 about +Y for the left leg (x < 0).
                 self.assertEqual(step["range_deg"], [0.0, 90.0] if x < 0 else [-90.0, 0.0])
-        for first in range(0, 10, 2):
+        for batch in ([0], [1, 2], [3, 4], [5, 6], [7, 8], [9]):
             result, built = _call(
-                "articulate_figure", {"name": "Dog", "plan": {"steps": plan["steps"], "only": [first, first + 1]}}
+                "articulate_figure", {"name": "Dog", "plan": {"steps": plan["steps"], "only": batch}}
             )
             self.assertFalse(result.is_error, result.text)
             self.assertNotIn("failed_step", built, json.dumps(built.get("failed_step"), indent=1)[:3000])
-            row = built["table"][0]
-            self.assertTrue(row["ok"], row)
-            self.assertGreaterEqual(row["built_min_gap_mm"], CLEARANCE - 0.02)
+            for row in built["table"]:
+                self.assertTrue(row["ok"], row)
+                self.assertGreaterEqual(row["built_min_gap_mm"], CLEARANCE - 0.02)
         self.assertNotIn("BC_Plano", bpy.data.collections)
         parts = [o for o in bpy.data.objects if o.type == "MESH"]
         self.assertEqual(len(parts), 6)

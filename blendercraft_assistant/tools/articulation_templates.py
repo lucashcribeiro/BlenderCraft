@@ -431,10 +431,22 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
         # Torso width at the waist: the ball needs walls on both sides.
         widths = [v[wi] for v in verts if abs(v.dot(head) - waist_s) < art._bu(1.0) and run and run[0] <= v.z <= run[1]]
         torso_w = (max(widths) - min(widths)) * mm if widths else 0.0
-        if torso_w and torso_w < ball + 2 * rules["min_wall_mm"] + 2 * clearance:
+        torso_h = (run[1] - run[0]) * mm if run else 0.0
+        room = min(x for x in (torso_w, torso_h) if x) if (torso_w or torso_h) else 0.0
+        fit = room - 2 * (rules["min_wall_mm"] + clearance) - 1.0
+        if room and ball > fit:
+            smaller = round(max(template["waist"]["ball_mm"]["min"], fit), 3)
             notes.append(
-                f"waist: torso only {torso_w:.1f} mm wide for a {ball} mm ball; "
-                "use the cap + transverse pin variant or a smaller ball"
+                f"waist: torso section {torso_w:.1f} x {torso_h:.1f} mm leaves room for a "
+                f"{fit:.1f} mm ball; ball reduced from {ball} to {smaller} mm"
+            )
+            ball = smaller
+            neck = min(neck, round(0.57 * ball, 3))
+            mouth = min(max(mouth, neck + 2 * clearance), ball - 0.4)
+        if room and room < ball + 2 * rules["min_wall_mm"] + 2 * clearance:
+            notes.append(
+                f"waist: torso only {room:.1f} mm for a {ball} mm ball; "
+                "use the cap + transverse pin variant (spec 6.1)"
             )
         cut_point = point.copy()
         steps.append(
@@ -448,7 +460,7 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
         # a lip of min_wall past the socket.
         depth = art._bu(ball / 2 + clearance + rules["min_wall_mm"] + 0.1)
         pivot = cut_point + rear_dir * depth
-        steps.append(
+        waist_joint = (
             {
                 "op": "joint", "id": "waist", "parent": rear, "child": front, "type": "ball",
                 "pivot": art._point_mm(pivot), "axis": [0.0, 0.0, 1.0], "size_mm": ball,
@@ -456,6 +468,8 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
                 "range_deg": template["waist"]["lateral_deg"], "relief": False,
             }
         )
+        # Built last: by then the legs hang from their halves, so the waist
+        # sweep turns the front legs with the front.
         table.append({"item": "waist ball / socket", "mm": [ball, round(ball + 2 * clearance, 3)], "neck_mm": neck,
                       "mouth_mm": round(mouth, 3), "gap_mm": gap})
         waist_l = waist_s
@@ -551,6 +565,8 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
                     "range_deg": rng, "parent": parent,
                 }
             )
+    if waist_l is not None:
+        steps.append(waist_joint)
     return {
         "target": target,
         "template": template["name"],

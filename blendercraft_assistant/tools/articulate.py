@@ -1845,6 +1845,8 @@ def add_joint(
             check_radius = max(sides[1]["hole_end"], sides[-1]["hole_end"]) + _bu(3.0)
             child_wall = _walls_from(_world_tree(child_obj), p, dp / 2 + c + _bu(0.3), _perpendicular_dirs(a, 32))
             built["child_wall_around_hole_mm"] = None if child_wall is None else _to_mm(child_wall)
+            if child_wall is not None and child_wall < _bu(0.8):
+                warnings.append(f"the wall around the pin hole is only {_to_mm(child_wall)} mm")
 
         elif joint_type == "ball":
             if p_in_child:
@@ -1908,6 +1910,11 @@ def add_joint(
             check_radius = d_child + _bu(3.0)
             socket_wall = _walls_from(_world_tree(parent_obj), p, r1 + _bu(0.3))
             built["parent_wall_around_socket_mm"] = None if socket_wall is None else _to_mm(socket_wall)
+            if socket_wall is not None and socket_wall < wall:
+                warnings.append(
+                    f"the socket wall is only {_to_mm(socket_wall)} mm somewhere (min {_MIN_WALL_MM}): "
+                    "use a smaller ball or move the pivot deeper into the part"
+                )
 
         else:  # cap
             parent_tree = _world_tree(parent_obj)
