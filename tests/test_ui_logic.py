@@ -15,7 +15,7 @@ REQUIRED_KEYS = (
     "queued attach_view attach_selection mode_auto mode_ask mode_readonly "
     "changes undo_ai undo_ai_blocked details show_older approve deny "
     "approval_request claude_missing claude_login step_limit unit joint "
-    "joint_reset copy_mcp scale_warning"
+    "joint_reset copy_mcp scale_warning summary_header"
 ).split()
 
 

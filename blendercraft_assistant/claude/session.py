@@ -33,7 +33,6 @@ IDLE = "IDLE"
 WORKING = "WORKING"
 ERROR = "ERROR"
 
-SUMMARY_HEADER = "Resumo da conversa anterior:"
 SUMMARY_MESSAGES = 10
 
 # User-visible texts; the runtime passes translated ones. Fields are
@@ -44,6 +43,8 @@ _DEFAULT_NOTES = {
     "exit_code": "Claude Code exited with code {code}",
     "send_failed": "Could not talk to Claude Code: {error}",
     "save_failed": "Could not save the conversation: {error}",
+    # Heads the history replayed when a --resume fails.
+    "summary_header": "Summary of the previous conversation:",
 }
 NOTE_KEYS = tuple(_DEFAULT_NOTES)
 
@@ -269,7 +270,7 @@ class AgentSession:
             f"{m.role}: {m.text}" for m in history[-SUMMARY_MESSAGES:] if m.text.strip()
         ]
         text, attachments = self._pending
-        summary = "\n".join([SUMMARY_HEADER, *lines])
+        summary = "\n".join([self._notes["summary_header"], *lines])
         self._assistant.text = ""
         self._assistant.tools = []
         self._tool_count = 0

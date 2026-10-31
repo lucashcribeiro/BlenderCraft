@@ -103,7 +103,11 @@ class SessionTestBase(unittest.TestCase):
     def make(self, **kwargs):
         kwargs.setdefault(
             "notes",
-            {"step_limit": "STEP LIMIT NOTE", "queue_dropped": "({n} DROPPED)"},
+            {
+                "step_limit": "STEP LIMIT NOTE",
+                "queue_dropped": "({n} DROPPED)",
+                "summary_header": "Resumo da conversa anterior:",
+            },
         )
         return AgentSession(
             self.conv,
@@ -821,7 +825,23 @@ class SessionNotesTest(SessionTestBase):
         "exit_code": "SAIU COM {code}",
         "send_failed": "SEM CONVERSA: {error}",
         "save_failed": "SEM GRAVAR: {error}",
+        "summary_header": "RESUMO ANTERIOR:",
     }
+
+    def test_summary_header_uses_note(self):
+        self.conv.claude_session_id = "abc"
+        session = self.make(notes=self.NOTES)
+        session.send("q")
+        self.exit_process(session, self.procs[0], 1)
+        self.assertTrue(self.procs[1].sent[0][0]["text"].startswith("RESUMO ANTERIOR:"))
+
+    def test_summary_header_default_is_english(self):
+        self.conv.claude_session_id = "abc"
+        session = self.make(notes=None)
+        session.send("q")
+        self.exit_process(session, self.procs[0], 1)
+        text = self.procs[1].sent[0][0]["text"]
+        self.assertTrue(text.startswith("Summary of the previous conversation:"), text)
 
     def test_note_keys(self):
         from blendercraft_assistant.claude import session as session_module

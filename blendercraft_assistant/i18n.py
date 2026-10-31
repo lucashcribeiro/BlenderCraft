@@ -62,6 +62,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "exit_code": "O Claude Code saiu com o código {code}",
         "send_failed": "Não foi possível falar com o Claude Code: {error}",
         "save_failed": "Não foi possível salvar a conversa: {error}",
+        "summary_header": "Resumo da conversa anterior:",
         "unit": "Unidade",
         "scale_warning": (
             "Este arquivo não está em milímetros: 1 unidade do Blender = {mm} mm."
@@ -142,6 +143,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "exit_code": "Claude Code exited with code {code}",
         "send_failed": "Could not talk to Claude Code: {error}",
         "save_failed": "Could not save the conversation: {error}",
+        "summary_header": "Summary of the previous conversation:",
         "unit": "Unit",
         "scale_warning": (
             "This file is not in millimeters: 1 Blender unit = {mm} mm."
