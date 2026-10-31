@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "blendercraft_assistant" / "plugin"
 SKILLS = ("blender-map", "design", "printing", "joints")
 # Every skill folder in the plugin (SKILLS are the ones the prompt names).
-ALL_SKILLS = SKILLS + ("organic-modeling",)
+ALL_SKILLS = SKILLS + ("organic-modeling", "quality-workflow")
 ORGANIC = PLUGIN / "skills" / "organic-modeling"
 
 
@@ -105,6 +105,9 @@ class PluginTests(unittest.TestCase):
         text = (ORGANIC / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("NOT", text)
         self.assertIn("remesh_smooth", text)
+        workflow = (PLUGIN / "skills" / "quality-workflow" / "SKILL.md").read_text(encoding="utf-8")
+        for phrase in ("Stage 0", "dossier", "gate", "generate_3d_model", "target-vs-built"):
+            self.assertIn(phrase, workflow)
 
 
 def _load_kit():
