@@ -8,7 +8,7 @@ from unittest import mock
 import bpy
 
 from blendercraft_assistant import i18n
-from blendercraft_assistant.ui.text_wrap import strip_markdown, wrap
+from blendercraft_assistant.ui.text_wrap import wrap
 
 REQUIRED_KEYS = (
     "assistant idle working error new_chat conversations stop send send_now "
@@ -80,23 +80,6 @@ class TextWrapTest(unittest.TestCase):
 
     def test_wrap_empty(self):
         self.assertEqual(wrap("", 280, 1), [])
-
-    def test_strip_markdown(self):
-        text = (
-            "# Título\n"
-            "## Seção\n"
-            "Um **cubo** de __20 mm__ com `bevel` e ```code```.\n"
-            "Veja [a documentação](https://docs.blender.org) e [isto](x).\n"
-            "Nota #3 fica."
-        )
-        self.assertEqual(
-            strip_markdown(text),
-            "Título\n"
-            "Seção\n"
-            "Um cubo de 20 mm com bevel e code.\n"
-            "Veja a documentação e isto.\n"
-            "Nota #3 fica.",
-        )
 
 
 class PropsTest(unittest.TestCase):
@@ -524,6 +507,16 @@ class FakeLayout:
         assert hasattr(bpy.types, panel), panel
         self.log.append(("popover", panel))
 
+    def template_list(self, listtype, list_id, dataptr, propname, active_dataptr, active_propname, rows=5, maxrows=5, **kwargs):
+        assert hasattr(bpy.types, listtype), listtype
+        assert propname in dataptr.bl_rna.properties, propname
+        assert active_propname in active_dataptr.bl_rna.properties, active_propname
+        self.log.append(("list", listtype, rows, maxrows))
+        # Draw every row the way Blender would, through the UIList.
+        ui_list = getattr(bpy.types, listtype)
+        for index, item in enumerate(getattr(dataptr, propname)):
+            ui_list.draw_item(ui_list, None, self, dataptr, item, 0, active_dataptr, active_propname, index)
+
 
 class PanelDrawTest(unittest.TestCase):
     def setUp(self):
@@ -580,7 +573,8 @@ class PanelDrawTest(unittest.TestCase):
         context.window_manager = bpy.context.window_manager
         context.scene = bpy.context.scene
         context.preferences = bpy.context.preferences
-        context.region = mock.Mock(width=300)
+        context.region = mock.Mock(width=300, height=800)
+        context.selected_objects = bpy.context.selected_objects
         context.active_object = bpy.context.active_object
         panel_cls.draw(fake, context)
         return log
@@ -604,26 +598,92 @@ class PanelDrawTest(unittest.TestCase):
             ("label", i18n.t("idle")),
             ("operator", "bc.new_chat"),
             ("popover", "VIEW3D_PT_bc_conversations"),
+            ("label", i18n.t("provider")),
             ("prop", "model"),
+            ("list", "BC_UL_chat"),
             ("label", i18n.t("you")),
-            ("prop", "input"),
-            ("prop", "attach_view"),
-            ("prop", "attach_selection"),
-            ("prop", "mode"),
             ("label", i18n.t("changes", n=0)),
             ("operator", "bc.undo_ai_changes"),
-            ("operator", "bc.set_unit"),
+            ("prop", "input"),
+            ("prop", "mode"),
+            ("operator", "bc.paste_draft"),
+            ("operator", "bc.edit_draft"),
+            ("operator", "bc.attach_file"),
+            ("operator", "bc.send"),
+            ("prop", "attach_view"),
+            ("prop", "attach_selection"),
+            ("operator", "bc.pick_context"),
         ]
         positions = [kinds.index(item) for item in order]
         self.assertEqual(positions, sorted(positions))
         self.assertNotIn("bc.stop", self.operators_drawn(log))
         self.assertNotIn("bc.send_now", self.operators_drawn(log))
-        # Older messages are hidden behind "show older".
-        self.assertIn("wm.context_set_int", self.operators_drawn(log))
+        # The list has a fixed height that fits the region.
+        (entry,) = [e for e in log if e[0] == "list"]
+        self.assertEqual(entry[2], entry[3])
+        scale = bpy.context.preferences.system.ui_scale or 1.0
+        # The 300 px test region is narrow: the attach row takes a second line.
+        self.assertEqual(entry[2], self.panel.chat_list.visible_rows(800, scale, 1))
+        # A draft preview takes room from the list.
+        self.bc.draft = "a\nb"
+        self.addCleanup(setattr, self.bc, "draft", "")
+        (entry,) = [e for e in self.draw(self.panel.VIEW3D_PT_bc_assistant) if e[0] == "list"]
+        self.assertLess(entry[2], self.panel.chat_list.visible_rows(800, scale))
         labels = self.labels(log)
         self.assertIn("Pronto", labels)
         self.assertIn("Criei o cubo com bevel.", labels)
         self.assertFalse(any("**" in label for label in labels))
+        # Secondary tools live in subpanels.
+        self.assertNotIn("bc.copy_mcp_command", self.operators_drawn(log))
+        self.assertNotIn("bc.set_unit", self.operators_drawn(log))
+
+    def test_show_older_for_long_conversations(self):
+        from blendercraft_assistant.conversations import Message
+
+        self.assertNotIn("wm.context_set_int", self.operators_drawn(self.draw(self.panel.VIEW3D_PT_bc_assistant)))
+        self.session.conversation.messages = [Message("user", f"m{i}") for i in range(100)]
+        self.assertIn("wm.context_set_int", self.operators_drawn(self.draw(self.panel.VIEW3D_PT_bc_assistant)))
+
+    def test_attach_selection_shows_count(self):
+        bpy.ops.mesh.primitive_cube_add()
+        cube = bpy.context.active_object
+        self.addCleanup(bpy.data.objects.remove, cube, do_unlink=True)
+        cube.select_set(True)
+        n = len(bpy.context.selected_objects)
+        log = []
+        fake = mock.Mock(layout=FakeLayout(log))
+        context = mock.Mock(wraps=bpy.context)
+        for name in ("window_manager", "scene", "preferences"):
+            setattr(context, name, getattr(bpy.context, name))
+        context.region = mock.Mock(width=300, height=800)
+        context.selected_objects = bpy.context.selected_objects
+        texts = []
+        orig = FakeLayout.prop
+
+        def prop(layout, data, name, text=None, **kwargs):
+            texts.append((name, text))
+            return orig(layout, data, name, text=text, **kwargs)
+
+        with mock.patch.object(FakeLayout, "prop", prop):
+            self.panel.VIEW3D_PT_bc_assistant.draw(fake, context)
+        self.assertIn(("attach_selection", i18n.t("attach_selection_n", n=n)), texts)
+
+    def test_draft_preview_and_file_chips(self):
+        from blendercraft_assistant.ui import draft
+
+        self.bc.draft = "# Plano\n| a | b |\n|---|---|\nlinha 4"
+        self.addCleanup(draft.clear, self.bc)
+        item = self.bc.attached_files.add()
+        item.name, item.content = "plano.md", "x"
+        self.addCleanup(self.bc.attached_files.clear)
+        log = self.draw(self.panel.VIEW3D_PT_bc_assistant)
+        labels = self.labels(log)
+        self.assertIn("# Plano", labels)
+        self.assertIn(i18n.t("draft_lines", n=4), labels)
+        self.assertIn("plano.md", labels)
+        ops = self.operators_drawn(log)
+        self.assertIn("bc.clear_draft", ops)
+        self.assertIn("bc.remove_file", ops)
 
     def test_working_shows_stop_send_now_and_queue(self):
         self.session.status = "WORKING"
@@ -663,9 +723,26 @@ class PanelDrawTest(unittest.TestCase):
         labels = " ".join(self.labels(self.draw(self.panel.VIEW3D_PT_bc_assistant)))
         self.assertIn(i18n.t("claude_login"), labels)
 
-    def test_copy_mcp_command_in_the_panel(self):
-        log = self.draw(self.panel.VIEW3D_PT_bc_assistant)
+    def test_settings_subpanel(self):
+        log = self.draw(self.panel.VIEW3D_PT_bc_settings)
         self.assertIn(("operator", "bc.copy_mcp_command", i18n.t("copy_mcp")), log)
+        self.assertIn("bc.set_unit", self.operators_drawn(log))
+        self.assertIn("DEFAULT_CLOSED", self.panel.VIEW3D_PT_bc_settings.bl_options)
+        self.assertEqual(self.panel.VIEW3D_PT_bc_settings.bl_parent_id, "VIEW3D_PT_bc_assistant")
+
+    def test_markdown_rows_drawn(self):
+        from pathlib import Path
+
+        from blendercraft_assistant.conversations import Message
+
+        fixture = (Path(__file__).parent / "fixtures" / "pernas.md").read_text(encoding="utf-8")
+        self.session.conversation.messages = [Message("user", fixture), Message("assistant", fixture)]
+        log = self.draw(self.panel.VIEW3D_PT_bc_assistant)
+        labels = self.labels(log)
+        # Table cells are drawn one label each.
+        self.assertGreaterEqual(labels.count("−23 % ❌"), 4)
+        self.assertGreaterEqual(labels.count("Margem"), 2)
+        self.assertIn("4. Pernas (4 iguais)", labels)
 
     def test_unit_selector_in_the_3d_view_header(self):
         header = bpy.types.VIEW3D_HT_header

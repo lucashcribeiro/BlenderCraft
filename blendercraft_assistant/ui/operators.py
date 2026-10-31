@@ -1,11 +1,14 @@
 """Panel operators (bc.*) and message submission."""
 
 import base64
+import os
+import time
 from contextlib import nullcontext
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
 from bpy.types import Operator
+from bpy_extras.io_utils import ImportHelper
 
 from .. import runtime
 from ..i18n import t
@@ -13,9 +16,14 @@ from ..tools.dispatch import call_tool
 from ..tools.joints import create_pivot, joint_test, reset
 from ..tools.view import screenshot
 from ..units import DISPLAY_UNITS, UNIT_LABELS, set_display_unit
+from . import draft
+from . import props as props_module
 
 # Selected objects described in one "attach selection" block.
 MAX_ATTACHED_OBJECTS = 20
+# Enter's key release must follow the field's commit within this time.
+ENTER_WINDOW = 0.6  # seconds
+MAX_FILE_CHARS = 200_000  # text read from an attached file
 
 # Shown in the panel: the last joint test and the last attachment problem.
 joint_result = ""
@@ -74,8 +82,11 @@ def _build_attachments(context) -> tuple[list[dict], list[str]]:
                     "text": "Selected objects (inspect_object):\n" + "\n".join(parts),
                 }
             )
+    for item in props.attached_files:
+        blocks.append({"type": "text", "text": f"Attached file: {item.name}\n\n{item.content}"})
     props.attach_view = False
     props.attach_selection = False
+    props.attached_files.clear()
     return blocks, warnings
 
 
@@ -103,10 +114,31 @@ def _runtime_ready(op) -> bool:
 
 
 def _take_input(context) -> str:
+    """The message to send: the draft, then the typed line, verbatim (only
+    the outer blank space is trimmed). Clears both. With nothing written
+    but files attached, the message names the files."""
     props = context.window_manager.bc
-    text = props.input.strip()
+    parts = [p for p in (draft.text(props).strip(), props.input.strip()) if p]
+    text = "\n\n".join(parts)
+    if not text and len(props.attached_files):
+        text = t("attached_files_msg", names=", ".join(f.name for f in props.attached_files))
     props.input = ""
+    draft.clear(props)
     return text
+
+
+def _has_message(props) -> bool:
+    return bool(props.input.strip() or draft.text(props).strip() or len(props.attached_files))
+
+
+def _send_typed(op, context, now: bool):
+    if not _runtime_ready(op):
+        return {"CANCELLED"}
+    text = _take_input(context)
+    if not text:
+        return {"CANCELLED"}
+    submit(context, text, now=now)
+    return {"FINISHED"}
 
 
 class BC_OT_send(Operator):
@@ -115,12 +147,149 @@ class BC_OT_send(Operator):
     bl_description = t("send")
 
     def execute(self, context):
-        if not _runtime_ready(self):
+        return _send_typed(self, context, now=False)
+
+
+def _just_committed() -> bool:
+    return time.monotonic() - props_module.input_committed_at < ENTER_WINDOW
+
+
+class BC_OT_send_key(Operator):
+    """Enter in the message field (keymap: Enter release).
+
+    Blender commits a text field the same way on Enter and on a click
+    elsewhere; only Enter is followed by its key release, right after the
+    commit. So this only runs within ENTER_WINDOW of the field's commit.
+    While the agent works the message is queued.
+    """
+
+    bl_idname = "bc.send_key"
+    bl_label = t("send_key")
+    bl_description = t("send_key")
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.window_manager.bc
+        return _just_committed() and _has_message(props)
+
+    def execute(self, context):
+        props_module.input_committed_at = 0.0  # one send per commit
+        return _send_typed(self, context, now=False)
+
+
+class BC_OT_send_key_now(Operator):
+    """Ctrl/Cmd+Enter: send now (interrupting the agent if it works).
+
+    Runs right after the field's commit, or with the pointer over a 3D View
+    (the field already committed)."""
+
+    bl_idname = "bc.send_key_now"
+    bl_label = t("send_key_now")
+    bl_description = t("send_key_now")
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.window_manager.bc
+        area = context.area
+        over_view = area is not None and area.type == "VIEW_3D"
+        return (_just_committed() or over_view) and _has_message(props)
+
+    def execute(self, context):
+        props_module.input_committed_at = 0.0
+        session = runtime.session
+        working = session is not None and session.status == "WORKING"
+        return _send_typed(self, context, now=working)
+
+
+class BC_OT_pick_context(Operator):
+    bl_idname = "bc.pick_context"
+    bl_label = t("pick_context")
+    bl_description = t("pick_context_desc")
+
+    def execute(self, context):
+        count = len(context.selected_objects)
+        if not count:
+            self.report({"WARNING"}, t("pick_context_none"))
             return {"CANCELLED"}
-        text = _take_input(context)
-        if not text:
+        context.window_manager.bc.attach_selection = True
+        self.report({"INFO"}, t("pick_context_done", n=count))
+        return {"FINISHED"}
+
+
+class BC_OT_paste_draft(Operator):
+    bl_idname = "bc.paste_draft"
+    bl_label = t("paste_draft")
+    bl_description = t("paste_draft_desc")
+
+    def execute(self, context):
+        value = draft.read_clipboard()
+        if not value.strip():
+            self.report({"WARNING"}, t("clipboard_empty"))
             return {"CANCELLED"}
-        submit(context, text)
+        draft.append(context.window_manager.bc, value.replace("\r\n", "\n"))
+        return {"FINISHED"}
+
+
+class BC_OT_edit_draft(Operator):
+    bl_idname = "bc.edit_draft"
+    bl_label = t("edit_draft")
+    bl_description = t("edit_draft_desc")
+
+    def execute(self, context):
+        txt = draft.open_composer(context.window_manager.bc)
+        if not draft.show_window(context, txt):
+            self.report({"INFO"}, t("draft_in_text_editor", name=txt.name))
+        return {"FINISHED"}
+
+
+class BC_OT_clear_draft(Operator):
+    bl_idname = "bc.clear_draft"
+    bl_label = t("clear_draft")
+    bl_description = t("clear_draft")
+
+    def execute(self, context):
+        draft.clear(context.window_manager.bc)
+        return {"FINISHED"}
+
+
+class BC_OT_attach_file(Operator, ImportHelper):
+    bl_idname = "bc.attach_file"
+    bl_label = t("attach_file")
+    bl_description = t("attach_file_desc")
+
+    filter_glob: StringProperty(default="*.md;*.markdown;*.txt", options={"HIDDEN"})
+    filepath: StringProperty(subtype="FILE_PATH", options={"HIDDEN", "SKIP_SAVE"})
+
+    def execute(self, context):
+        try:
+            with open(self.filepath, encoding="utf-8", errors="replace") as fh:
+                content = fh.read(MAX_FILE_CHARS + 1)
+        except OSError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        if len(content) > MAX_FILE_CHARS:
+            content = content[:MAX_FILE_CHARS]
+            self.report({"WARNING"}, t("file_truncated", n=MAX_FILE_CHARS))
+        item = context.window_manager.bc.attached_files.add()
+        item.name = os.path.basename(self.filepath)
+        item.content = content
+        return {"FINISHED"}
+
+
+class BC_OT_remove_file(Operator):
+    bl_idname = "bc.remove_file"
+    bl_label = t("remove_file")
+    bl_description = t("remove_file")
+
+    index: IntProperty(options={"SKIP_SAVE", "HIDDEN"})
+
+    def execute(self, context):
+        files = context.window_manager.bc.attached_files
+        if not 0 <= self.index < len(files):
+            return {"CANCELLED"}
+        files.remove(self.index)
         return {"FINISHED"}
 
 
@@ -373,7 +542,15 @@ class BC_OT_copy_mcp_command(Operator):
 
 CLASSES = (
     BC_OT_send,
+    BC_OT_send_key,
+    BC_OT_send_key_now,
     BC_OT_send_now,
+    BC_OT_pick_context,
+    BC_OT_paste_draft,
+    BC_OT_edit_draft,
+    BC_OT_clear_draft,
+    BC_OT_attach_file,
+    BC_OT_remove_file,
     BC_OT_stop,
     BC_OT_new_chat,
     BC_OT_open_conversation,

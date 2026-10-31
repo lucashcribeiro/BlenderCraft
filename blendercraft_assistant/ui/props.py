@@ -1,9 +1,12 @@
 """Panel state on the WindowManager (runtime only, never saved in .blend)."""
 
+import time
+
 import bpy
 from bpy.app.handlers import persistent
 from bpy.props import (
     BoolProperty,
+    CollectionProperty,
     EnumProperty,
     FloatProperty,
     IntProperty,
@@ -20,6 +23,16 @@ from ..tools.joints import set_angle
 # default model ("") is stored as DEFAULT.
 MODEL_DEFAULT = "DEFAULT"
 ANGLE_TOLERANCE = 1e-4  # degrees
+
+# When the message field was last committed (time.monotonic()). Enter and a
+# click elsewhere both commit it; only Enter is followed by a key release,
+# which the bc.send_key keymap item checks against this time.
+input_committed_at = 0.0
+
+
+def _on_input(self, context):
+    global input_committed_at
+    input_committed_at = time.monotonic()
 
 
 def _on_mode(self, context):
@@ -52,11 +65,30 @@ def _on_joint_angle(self, context):
         set_angle(pivot.name, self.joint_angle)
 
 
+class BC_ChatLine(PropertyGroup):
+    """One display row of the conversation list (see chat_list)."""
+
+    kind: StringProperty()
+    text: StringProperty()
+    tool_id: StringProperty()
+    status: StringProperty()
+
+
+class BC_AttachedFile(PropertyGroup):
+    """A text file attached to the next message (name shown as a chip)."""
+
+    name: StringProperty()
+    content: StringProperty()
+
+
 class BC_Props(PropertyGroup):
-    # No update callback: Blender commits a text field the same way on Enter
-    # and on a click elsewhere, so sending on update would also send on a
-    # stray click. The Send button (bc.send) sends.
-    input: StringProperty(name=t("message"))
+    # The update never sends: Blender commits a text field the same way on
+    # Enter and on a click elsewhere. It only records the time, and the
+    # Enter key release (keymap item bc.send_key) sends.
+    input: StringProperty(name=t("message"), update=_on_input)
+    # Multi-line text pasted from the clipboard (the field above is
+    # single-line). While the composer is open its Text block holds it.
+    draft: StringProperty()
     mode: EnumProperty(
         name=t("mode"),
         items=[
@@ -81,7 +113,10 @@ class BC_Props(PropertyGroup):
     )
     attach_view: BoolProperty(name=t("attach_view"))
     attach_selection: BoolProperty(name=t("attach_selection"))
+    attached_files: CollectionProperty(type=BC_AttachedFile)
     show_older: IntProperty(min=0)  # pages of older messages shown
+    chat_lines: CollectionProperty(type=BC_ChatLine)
+    chat_index: IntProperty(min=0)  # active row: kept on the last row to follow the bottom
     expanded_tool: StringProperty()  # tool call id whose details are open
     joint_pivot: StringProperty(name=t("joint_pivot"), update=_on_joint_pivot)
     joint_angle: FloatProperty(
@@ -109,6 +144,8 @@ def _sync_after_load(*_args) -> None:
 
 
 def register() -> None:
+    bpy.utils.register_class(BC_ChatLine)
+    bpy.utils.register_class(BC_AttachedFile)
     bpy.utils.register_class(BC_Props)
     WindowManager.bc = PointerProperty(type=BC_Props)
     if _sync_after_load not in bpy.app.handlers.load_post:
@@ -120,3 +157,5 @@ def unregister() -> None:
         bpy.app.handlers.load_post.remove(_sync_after_load)
     del WindowManager.bc
     bpy.utils.unregister_class(BC_Props)
+    bpy.utils.unregister_class(BC_AttachedFile)
+    bpy.utils.unregister_class(BC_ChatLine)

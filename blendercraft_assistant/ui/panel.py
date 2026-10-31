@@ -1,4 +1,10 @@
-"""The Assistant tab in the 3D View sidebar."""
+"""The Assistant tab in the 3D View sidebar.
+
+Laid out like SolidCraft's Assistant: a header with the status badge and
+chat buttons, the provider and model, the conversation in a fixed-height
+scrollable list (chat_list), a footer with the change count, and the input
+card at the bottom. Joint tools and settings are collapsed subpanels.
+"""
 
 import json
 
@@ -8,51 +14,49 @@ from bpy.types import Panel
 from .. import runtime
 from ..i18n import t
 from ..units import UNIT_LABELS, get_display_unit, mm_per_bu
-from . import operators
-from .text_wrap import strip_markdown, wrap
+from . import chat_list, draft, operators
+from .text_wrap import wrap
 
-RECENT_MESSAGES = 6  # messages shown per "show older" page
-DETAIL_CHARS = 600  # tool input/output shown under Details
-SUMMARY_CHARS = 40
+DETAIL_CHARS = 600  # tool input shown in the approval block
 MAX_CONVERSATIONS = 30
 _MARGIN_PX = 40  # panel padding left out of the text width
+NARROW_PX = 420  # below this width the attach row takes two lines
 
 _STATUS = {
     "IDLE": ("idle", "CHECKMARK"),
-    "WORKING": ("working", "SORTTIME"),
+    "WORKING": ("working", "TIME"),
     "ERROR": ("error", "ERROR"),
 }
-_TOOL_ICONS = {
-    "running": "SORTTIME",
-    "ok": "CHECKMARK",
-    "error": "ERROR",
-    "interrupted": "CANCEL",
-}
+
+
+def _scale(context) -> float:
+    return context.preferences.system.ui_scale or 1.0
+
+
+def _region_size(context) -> tuple[float, float]:
+    region = context.region
+    width = getattr(region, "width", None)
+    height = getattr(region, "height", None)
+    width = width if isinstance(width, (int, float)) else 300
+    height = height if isinstance(height, (int, float)) else 600
+    return width, height
+
+
+def _text_width(context) -> int:
+    return int(_region_size(context)[0] - _MARGIN_PX * _scale(context))
 
 
 def _text_lines(layout, context, text: str, alert: bool = False) -> None:
     """Labels for text wrapped to the panel width."""
-    scale = context.preferences.system.ui_scale or 1.0
-    region = context.region
-    width = (region.width if region is not None else 300) - _MARGIN_PX * scale
     col = layout.column(align=True)
     col.scale_y = 0.8
     col.alert = alert
-    for line in wrap(text, int(width), scale):
+    for line in wrap(text, _text_width(context), _scale(context)):
         col.label(text=line)
 
 
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[:limit]}…"
-
-
-def _tool_summary(tool) -> str:
-    """One-line summary of a call: its description, else its first argument."""
-    data = tool.input if isinstance(tool.input, dict) else {}
-    value = data.get("description")
-    if not isinstance(value, str) or not value:
-        value = next((v for v in data.values() if isinstance(v, (str, int, float))), "")
-    return _clip(" ".join(str(value).split()), SUMMARY_CHARS)
 
 
 def _draw_approval(layout, context) -> None:
@@ -80,47 +84,124 @@ def _draw_claude_problem(layout, context) -> None:
     _text_lines(box, context, t("claude_login" if problem == "login" else "claude_missing"), alert=True)
 
 
-def _draw_tool(layout, context, tool, props) -> None:
-    expanded = props.expanded_tool == tool.id
+def _draw_header(layout, status: str) -> None:
+    """Status badge on the left, chat buttons on the right."""
     row = layout.row(align=True)
-    summary = _tool_summary(tool)
-    row.label(
-        text=f"{tool.name}: {summary}" if summary else tool.name,
-        icon=_TOOL_ICONS.get(tool.status, "QUESTION"),
-    )
-    # Icon only (tooltip "Details"): a text button would squeeze the name.
-    op = row.operator(
-        "bc.toggle_details",
-        text="",
-        icon="DISCLOSURE_TRI_DOWN" if expanded else "DISCLOSURE_TRI_RIGHT",
-        emboss=False,
-    )
-    op.tool_id = tool.id
-    if expanded:
-        box = layout.box()
-        tool_input = json.dumps(tool.input, ensure_ascii=False, indent=1)
-        _text_lines(box, context, "→ " + _clip(tool_input, DETAIL_CHARS))
-        if tool.output:
-            _text_lines(box, context, "← " + _clip(tool.output, DETAIL_CHARS))
+    badge = row.row(align=True)
+    badge.alert = status == "ERROR"
+    key, icon = _STATUS.get(status, _STATUS["IDLE"])
+    badge.label(text=t(key), icon=icon)
+    buttons = row.row(align=True)
+    buttons.alignment = "RIGHT"
+    buttons.emboss = "NONE"
+    if status == "WORKING":
+        buttons.operator("bc.stop", text="", icon="CANCEL")
+    buttons.operator("bc.new_chat", text="", icon="ADD")
+    buttons.popover(panel="VIEW3D_PT_bc_conversations", text="", icon="FILE_FOLDER")
 
 
-def _draw_conversation(layout, context, session, props) -> None:
-    messages = session.conversation.messages if session is not None else []
-    shown = RECENT_MESSAGES * (1 + props.show_older)
-    if len(messages) > shown:
+def _extra_rows(session, props) -> int:
+    """Rows taken by optional blocks, so the input card stays in view."""
+    extra = 0
+    if draft.exists(props):
+        extra += draft.PREVIEW_LINES + 2
+    extra += len(props.attached_files)
+    if session is not None and session.queue:
+        extra += 1
+    if runtime.pending_approval is not None:
+        extra += 8
+    if runtime.claude_problem:
+        extra += 3
+    return extra
+
+
+def _draw_stream(layout, context, session, props) -> None:
+    """The conversation: a list with its own scrollbar."""
+    width, height = _region_size(context)
+    scale = _scale(context)
+    try:
+        chat_list.sync(props, session, width, scale)
+    except AttributeError:  # writing is refused in this context: next redraw
+        pass
+    if chat_list.has_older(session, props):
         op = layout.operator("wm.context_set_int", text=t("show_older"), icon="TRIA_UP")
         op.data_path = "window_manager.bc.show_older"
         op.value = props.show_older + 1
-    for message in messages[-shown:]:
-        box = layout.box()
-        user = message.role == "user"
-        box.label(text=t("you") if user else t("claude"), icon="USER" if user else "LIGHT")
-        if message.text:
-            _text_lines(box, context, message.text if user else strip_markdown(message.text))
-        for tool in message.tools:
-            _draw_tool(box, context, tool, props)
-    if session is not None and session.error:
-        _text_lines(layout.box(), context, session.error, alert=True)
+    extra = _extra_rows(session, props) + (1 if width < NARROW_PX * scale else 0)
+    rows = chat_list.visible_rows(height, scale, extra)
+    layout.template_list(
+        "BC_UL_chat", "", props, "chat_lines", props, "chat_index", rows=rows, maxrows=rows
+    )
+
+
+def _draw_footer(layout, context, session) -> None:
+    row = layout.row(align=True)
+    row.label(text=t("changes", n=session.changes if session is not None else 0))
+    row.operator("bc.undo_ai_changes", text="", icon="LOOP_BACK")
+    if operators.notice:
+        _text_lines(layout, context, operators.notice, alert=True)
+
+
+def _draw_draft(layout, context, props) -> None:
+    """Preview of a multi-line draft, with edit and discard buttons."""
+    value = draft.text(props)
+    lines, count = draft.preview(value, _text_width(context) - 20, _scale(context))
+    box = layout.box()
+    col = box.column(align=True)
+    col.scale_y = 0.8
+    col.active = False
+    for line in lines:
+        col.label(text=line)
+    row = box.row(align=True)
+    row.label(text=t("draft_lines", n=count), icon="TEXT")
+    row.operator("bc.edit_draft", text="", icon="GREASEPENCIL")
+    row.operator("bc.clear_draft", text="", icon="X")
+
+
+def _draw_input_card(layout, context, session, props, status: str) -> None:
+    working = status == "WORKING"
+    card = layout.box()
+    if draft.exists(props):
+        _draw_draft(card, context, props)
+    for index, item in enumerate(props.attached_files):
+        chip = card.row(align=True)
+        chip.label(text=item.name, icon="FILE_TEXT")
+        op = chip.operator("bc.remove_file", text="", icon="X")
+        op.index = index
+    card.prop(
+        props,
+        "input",
+        text="",
+        placeholder=t("placeholder_working" if working else "placeholder"),
+    )
+    row = card.row(align=True)
+    row.operator("bc.new_chat", text="", icon="ADD")
+    row.prop(props, "mode", text="")
+    row.operator("bc.paste_draft", text="", icon="PASTEDOWN")
+    row.operator("bc.edit_draft", text="", icon="TEXT")
+    row.operator("bc.attach_file", text="", icon="FILE_TEXT")
+    send = row.row(align=True)
+    send.scale_x = 1.3
+    if working:
+        send.operator("bc.send", text="", icon="SORTTIME")  # queued for later
+        send.operator("bc.send_now", text="", icon="FF")
+        stop = send.row(align=True)
+        stop.alert = True
+        stop.operator("bc.stop", text="", icon="SNAP_FACE")
+    else:
+        send.operator("bc.send", text="", icon="PLAY")
+    if session is not None and session.queue:
+        card.label(text=t("queued", n=len(session.queue)), icon="SORTTIME")
+    attach = card.row(align=True)
+    attach.prop(props, "attach_view", text=t("attach_view"))
+    attach.prop(
+        props,
+        "attach_selection",
+        text=t("attach_selection_n", n=len(context.selected_objects or ())),
+    )
+    if _region_size(context)[0] < NARROW_PX * _scale(context):
+        attach = card.row(align=True)  # a narrow sidebar gets a second line
+    attach.operator("bc.pick_context", text=t("pick_context"), icon="RESTRICT_SELECT_OFF")
 
 
 class VIEW3D_PT_bc_assistant(Panel):
@@ -131,59 +212,26 @@ class VIEW3D_PT_bc_assistant(Panel):
 
     def draw(self, context):
         layout = self.layout
+        layout.use_property_split = False
         props = context.window_manager.bc
         session = runtime.session
         status = session.status if session is not None else "IDLE"
 
         _draw_approval(layout, context)
         _draw_claude_problem(layout, context)
-
-        # Header: status badge, new chat, saved conversations.
-        row = layout.row(align=True)
-        key, icon = _STATUS.get(status, _STATUS["IDLE"])
-        row.label(text=t(key), icon=icon)
-        row.operator("bc.new_chat", text="", icon="ADD")
-        row.popover(panel="VIEW3D_PT_bc_conversations", text="", icon="FILE_FOLDER")
-
-        layout.prop(props, "model", text=t("model"))
-
-        if status == "WORKING":
-            row = layout.row()
-            row.alert = True
-            row.operator("bc.stop", text=t("stop"), icon="CANCEL")
-
-        _draw_conversation(layout, context, session, props)
+        _draw_header(layout, status)
 
         row = layout.row(align=True)
-        row.prop(props, "input", text="", placeholder=t("message"))
-        row.operator("bc.send", text="", icon="PLAY")
-        if status == "WORKING":
-            layout.operator("bc.send_now", text=t("send_now"), icon="FF")
-        if session is not None and session.queue:
-            layout.label(text=t("queued", n=len(session.queue)), icon="SORTTIME")
-        if operators.notice:
-            _text_lines(layout, context, operators.notice, alert=True)
+        row.label(text=t("provider"), icon="LIGHT")
+        row.prop(props, "model", text="")
 
-        row = layout.row()
-        row.prop(props, "attach_view")
-        row.prop(props, "attach_selection")
-
-        layout.prop(props, "mode", text="")
-
-        row = layout.row(align=True)
-        row.label(text=t("changes", n=session.changes if session is not None else 0))
-        row.operator("bc.undo_ai_changes", text=t("undo_ai"), icon="LOOP_BACK")
-
-        row = layout.row(align=True)
-        row.label(text=t("unit"))
-        row.operator_menu_enum(
-            "bc.set_unit", "unit", text=UNIT_LABELS[get_display_unit(context.scene)]
-        )
         scale = mm_per_bu(context.scene)
         if scale != 1.0:
             _text_lines(layout, context, t("scale_warning", mm=f"{scale:g}"), alert=True)
 
-        layout.operator("bc.copy_mcp_command", text=t("copy_mcp"), icon="COPYDOWN")
+        _draw_stream(layout, context, session, props)
+        _draw_footer(layout, context, session)
+        _draw_input_card(layout, context, session, props, status)
 
 
 class VIEW3D_PT_bc_conversations(Panel):
@@ -240,6 +288,24 @@ class VIEW3D_PT_bc_joint(Panel):
             _text_lines(layout, context, operators.joint_result)
 
 
+class VIEW3D_PT_bc_settings(Panel):
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Assistant"  # translated in register()
+    bl_parent_id = "VIEW3D_PT_bc_assistant"
+    bl_label = t("settings")
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        row = layout.row(align=True)
+        row.label(text=t("unit"))
+        row.operator_menu_enum(
+            "bc.set_unit", "unit", text=UNIT_LABELS[get_display_unit(context.scene)]
+        )
+        layout.operator("bc.copy_mcp_command", text=t("copy_mcp"), icon="COPYDOWN")
+
+
 def draw_unit_header(self, context) -> None:
     """Display unit selector at the end of the 3D View header."""
     self.layout.operator_menu_enum(
@@ -254,13 +320,21 @@ def register_header() -> None:
     header.append(draw_unit_header)
 
 
-CLASSES = (VIEW3D_PT_bc_assistant, VIEW3D_PT_bc_conversations, VIEW3D_PT_bc_joint)
+CLASSES = (
+    chat_list.BC_UL_chat,
+    VIEW3D_PT_bc_assistant,
+    VIEW3D_PT_bc_conversations,
+    VIEW3D_PT_bc_joint,
+    VIEW3D_PT_bc_settings,
+)
 
 
 def register() -> None:
+    chat_list.reset()
     category = t("assistant")
     VIEW3D_PT_bc_assistant.bl_category = category
     VIEW3D_PT_bc_joint.bl_category = category
+    VIEW3D_PT_bc_settings.bl_category = category
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     register_header()
