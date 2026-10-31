@@ -1,4 +1,5 @@
-"""Enter and Ctrl/Cmd+Enter in the message field.
+"""Add-on shortcuts: Enter and Ctrl/Cmd+Enter in the message field, and
+Ctrl/Cmd+Shift+O for File > Open model….
 
 The items react to the key *release*: the press is taken by the text
 field, which commits; the release that follows reaches the Window keymap.
@@ -21,6 +22,9 @@ def register() -> None:
         items.append((km, km.keymap_items.new("bc.send_key", key, "RELEASE")))
         items.append((km, km.keymap_items.new("bc.send_key_now", key, "RELEASE", ctrl=True)))
         items.append((km, km.keymap_items.new("bc.send_key_now", key, "RELEASE", oskey=True)))
+    # File > Open model… (takes over Blender's Open Recent shortcut).
+    items.append((km, km.keymap_items.new("bc.open_model", "O", "PRESS", ctrl=True, shift=True)))
+    items.append((km, km.keymap_items.new("bc.open_model", "O", "PRESS", oskey=True, shift=True)))
 
 
 def unregister() -> None:

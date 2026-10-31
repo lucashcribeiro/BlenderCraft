@@ -1,4 +1,4 @@
-"""File > Import/Export 3MF and drag-and-drop of .3mf files.
+"""File > Open model…, File > Import/Export 3MF and drag-and-drop of .3mf.
 
 3MF goes through io_3mf (files in millimeters, converted with mm_per_bu).
 STL needs nothing here: Blender's own STL importer reads 1 file unit as
@@ -15,6 +15,8 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 from ..i18n import t
 from ..io_3mf import export_3mf, import_3mf
 from ..units import mm_per_bu
+
+MODEL_EXTENSIONS = (".stl", ".3mf", ".obj", ".ply", ".glb", ".gltf")
 
 
 def export_candidates(context) -> list:
@@ -114,6 +116,137 @@ class BC_OT_export_3mf(Operator, ExportHelper):
         return {"FINISHED"}
 
 
+def _frame_selected(context) -> None:
+    """Frame the selection in the largest 3D View (no-op without a UI)."""
+    screen = context.screen if context.window is not None else None
+    areas = [a for a in getattr(screen, "areas", ()) if a.type == "VIEW_3D"]
+    if not areas:
+        return
+    area = max(areas, key=lambda a: a.width * a.height)
+    region = next((r for r in area.regions if r.type == "WINDOW"), None)
+    if region is None:
+        return
+    with context.temp_override(area=area, region=region):
+        bpy.ops.view3d.view_selected()
+
+
+class BC_OT_open_model(Operator, ImportHelper):
+    """File > Open model…: STL, 3MF, OBJ, PLY and glTF into the current
+    scene, at the right size (the same import as the assistant's
+    import_file tool). File > Open itself only reads .blend files."""
+
+    bl_idname = "bc.open_model"
+    bl_label = t("open_model")
+    bl_description = t("open_model_desc")
+    bl_options = {"REGISTER", "UNDO"}
+
+    filter_glob: StringProperty(
+        default=";".join(f"*{ext}" for ext in MODEL_EXTENSIONS), options={"HIDDEN"}
+    )
+    filepath: StringProperty(subtype="FILE_PATH", options={"HIDDEN", "SKIP_SAVE"})
+    directory: StringProperty(subtype="DIR_PATH", options={"HIDDEN", "SKIP_SAVE"})
+    files: CollectionProperty(type=OperatorFileListElement, options={"HIDDEN", "SKIP_SAVE"})
+
+    def _paths(self) -> list[str]:
+        if self.directory and len(self.files):
+            return [os.path.join(self.directory, f.name) for f in self.files if f.name]
+        return [self.filepath] if self.filepath else []
+
+    def execute(self, context):
+        from ..tools.files import _import_file
+
+        paths = self._paths()
+        if not paths:
+            return {"CANCELLED"}
+        created = []
+        errors = []
+        for path in paths:
+            before = set(bpy.data.objects)
+            try:
+                _import_file({"path": path})
+            except Exception as exc:  # noqa: BLE001 - reported to the user
+                errors.append(f"{os.path.basename(path)}: {exc}")
+            created += [o for o in bpy.data.objects if o not in before]
+        if not created:
+            self.report({"ERROR"}, "\n".join(errors) or t("opened_models", n=0))
+            return {"CANCELLED"}
+        for obj in context.view_layer.objects:
+            obj.select_set(False)
+        for obj in created:
+            if context.view_layer.objects.get(obj.name) is obj:
+                obj.select_set(True)
+        context.view_layer.objects.active = created[0]
+        _frame_selected(context)
+        if errors:
+            self.report({"WARNING"}, "\n".join(errors))
+        self.report({"INFO"}, t("opened_models", n=len(created)))
+        return {"FINISHED"}
+
+
+# Blender's own File menu draw, wrapped so "Open model…" sits right under
+# "Open…" (a menu can only be appended or prepended to otherwise).
+_original_file_draw = None
+
+
+class _InsertAfterOpen:
+    """Layout stand-in that adds our item right after wm.open_mainfile."""
+
+    def __init__(self, layout, inserted: list):
+        object.__setattr__(self, "_layout", layout)
+        object.__setattr__(self, "_inserted", inserted)
+
+    def __getattr__(self, name):
+        return getattr(self._layout, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._layout, name, value)
+
+    def operator(self, idname, *args, **kwargs):
+        result = self._layout.operator(idname, *args, **kwargs)
+        if idname == "wm.open_mainfile" and not self._inserted:
+            _draw_open_model(self._layout)
+            self._inserted.append(True)
+        return result
+
+
+class _MenuStandIn:
+    def __init__(self, menu, layout):
+        object.__setattr__(self, "_menu", menu)
+        object.__setattr__(self, "layout", layout)
+
+    def __getattr__(self, name):
+        return getattr(self._menu, name)
+
+
+def _draw_open_model(layout) -> None:
+    layout.operator("bc.open_model", text=t("open_model"), icon="IMPORT")
+
+
+def draw_file_menu(self, context) -> None:
+    inserted: list = []
+    original = _original_file_draw
+    if original is not None:
+        original(_MenuStandIn(self, _InsertAfterOpen(self.layout, inserted)), context)
+    if not inserted:
+        _draw_open_model(self.layout)
+
+
+def _wrap_file_menu() -> None:
+    global _original_file_draw
+    funcs = bpy.types.TOPBAR_MT_file._dyn_ui_initialize()
+    if funcs and funcs[0] is not draw_file_menu:
+        _original_file_draw = funcs[0]
+        funcs[0] = draw_file_menu
+
+
+def _unwrap_file_menu() -> None:
+    global _original_file_draw
+    funcs = bpy.types.TOPBAR_MT_file._dyn_ui_initialize()
+    if funcs and funcs[0] is draw_file_menu and _original_file_draw is not None:
+        funcs[0] = _original_file_draw
+    _original_file_draw = None
+
+
 class IO_FH_bc_3mf(FileHandler):
     """Dropping .3mf files on the 3D View imports them."""
 
@@ -136,7 +269,7 @@ def menu_export(self, context) -> None:
     self.layout.operator("bc.export_3mf", text=t("menu_3mf"))
 
 
-CLASSES = (BC_OT_import_3mf, BC_OT_export_3mf, IO_FH_bc_3mf)
+CLASSES = (BC_OT_import_3mf, BC_OT_export_3mf, BC_OT_open_model, IO_FH_bc_3mf)
 
 
 def register() -> None:
@@ -148,9 +281,11 @@ def register() -> None:
     ):
         menu.remove(fn)
         menu.append(fn)
+    _wrap_file_menu()
 
 
 def unregister() -> None:
+    _unwrap_file_menu()
     bpy.types.TOPBAR_MT_file_import.remove(menu_import)
     bpy.types.TOPBAR_MT_file_export.remove(menu_export)
     for cls in reversed(CLASSES):

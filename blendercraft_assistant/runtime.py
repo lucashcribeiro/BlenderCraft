@@ -164,10 +164,19 @@ def _pref(name: str, default):
     return getattr(addon.preferences, name, default)
 
 
+# Extra callables run by tag_redraw() (the top bar's status icon).
+redraw_hooks: list = []
+
+
 def tag_redraw() -> None:
     """Redraw the 3D Views (the panel lives there). No-op without a UI."""
     if bpy.app.background:
         return
+    for hook in list(redraw_hooks):
+        try:
+            hook()
+        except Exception:  # noqa: BLE001 - a redraw hook must not break callers
+            traceback.print_exc()
     wm = getattr(bpy.context, "window_manager", None)
     if wm is None:
         return

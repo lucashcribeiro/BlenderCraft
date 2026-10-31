@@ -125,6 +125,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "remove_file": "Remover anexo",
         "file_truncated": "Arquivo grande: só os primeiros {n} caracteres vão junto",
         "attached_files_msg": "Arquivo anexado: {names}",
+        "open_model": "Abrir modelo… (STL, 3MF, OBJ, PLY, GLB)",
+        "open_model_desc": "Importa STL, 3MF, OBJ, PLY ou glTF na cena atual, no tamanho certo (STL em mm)",
+        "opened_models": "{n} objetos abertos",
+        "toggle_assistant": "Assistente",
+        "toggle_assistant_desc": "Mostra ou esconde o Assistente na lateral da vista 3D",
+        "no_3d_view": "Nenhuma vista 3D nesta tela",
     },
     "en": {
         "assistant": "Assistant",
@@ -244,6 +250,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "remove_file": "Remove attachment",
         "file_truncated": "Large file: only the first {n} characters go along",
         "attached_files_msg": "Attached file: {names}",
+        "open_model": "Open model… (STL, 3MF, OBJ, PLY, GLB)",
+        "open_model_desc": "Import STL, 3MF, OBJ, PLY or glTF into the current scene at the right size (STL in mm)",
+        "opened_models": "Opened {n} objects",
+        "toggle_assistant": "Assistant",
+        "toggle_assistant_desc": "Show or hide the Assistant in the 3D View sidebar",
+        "no_3d_view": "No 3D View on this screen",
     },
 }
 

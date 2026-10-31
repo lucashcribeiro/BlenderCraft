@@ -98,10 +98,10 @@ class KeysTest(_Base):
             self.assertIn(("Window", "bc.send_key_now", key, "RELEASE", True, False), items)
             self.assertIn(("Window", "bc.send_key_now", key, "RELEASE", False, True), items)
         km = self.keymap.items[0][0]
-        count = len(km.keymap_items)
+        count, ours = len(km.keymap_items), len(self.keymap.items)
         self.keymap.unregister()
         self.assertEqual(self.keymap.items, [])
-        self.assertEqual(len(km.keymap_items), count - 6)
+        self.assertEqual(len(km.keymap_items), count - ours)
         self.keymap.register()  # what the cleanup unregisters
 
 
