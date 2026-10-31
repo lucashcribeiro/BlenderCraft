@@ -469,11 +469,11 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
         walk = str(options.get("leg_axis", "")).lower() == "walk"
         for leg in analysis["legs"]:
             label = leg["name"]
-            if leg.get("existing_part"):
-                notes.append(f"{label}: separate part {leg['part']}: weld it first (prepare_mesh weld_near)")
-                continue
-            box = leg["ball"]["cutter"]
-            z_cut = art._bu(box["center"][2] + box["size"][2] / 2)
+            existing = leg.get("existing_part")
+            z_cut = art._bu(leg["leg_top_z_mm"])
+            box = leg.get("ball", {}).get("cutter")
+            if box:
+                z_cut = art._bu(box["center"][2] + box["size"][2] / 2)
             foot = Vector((art._bu(leg["foot_center_mm"][0]), art._bu(leg["foot_center_mm"][1]), 0.0))
             ext = leg["column_size_mm"]
             ext_l, ext_w = art._bu(ext[analysis["length_axis"]]), art._bu(ext[analysis["width_axis"]])
@@ -506,33 +506,35 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
                 rng = [-span_in, span_out]
             else:
                 rng = [-span_out, span_in]
-            foot_box = dict(box)
-            column_size = [0.0, 0.0, 0.0]
-            column_size[li] = round(ext_l * mm, 3)
-            column_size[wi] = round(ext_w * mm, 3)
-            column_size[2] = round((pz - z_cut + art._bu(0.5)) * mm, 3)
-            column_centre = foot.copy()
-            column_centre.z = (pz + z_cut - art._bu(0.5)) / 2
-            knuckle_a = pivot - axis * (along / 2)
-            knuckle_b = pivot + axis * (along / 2)
             parent = front
             if waist_l is not None:
                 parent = front if foot.dot(head) > waist_l else rear
-            child = f"{target}_{label}"
-            steps.append(
-                {
-                    "op": "cut", "id": label, "part": parent, "new_part_name": child, "gap_mm": clearance,
-                    "cutter": {
-                        "type": "union",
-                        "parts": [
-                            foot_box,
-                            {"type": "box", "center": art._point_mm(column_centre), "size": column_size},
-                            {"type": "cylinder", "start": art._point_mm(knuckle_a), "end": art._point_mm(knuckle_b),
-                             "radius": round(radius * mm, 3)},
-                        ],
-                    },
-                }
-            )
+            child = leg["part"] if existing else f"{target}_{label}"
+            if existing:
+                notes.append(f"{label}: already a separate part ({child}); joined as it is (no cut)")
+            else:
+                column_size = [0.0, 0.0, 0.0]
+                column_size[li] = round(ext_l * mm, 3)
+                column_size[wi] = round(ext_w * mm, 3)
+                column_size[2] = round((pz - z_cut + art._bu(0.5)) * mm, 3)
+                column_centre = foot.copy()
+                column_centre.z = (pz + z_cut - art._bu(0.5)) / 2
+                knuckle_a = pivot - axis * (along / 2)
+                knuckle_b = pivot + axis * (along / 2)
+                steps.append(
+                    {
+                        "op": "cut", "id": label, "part": parent, "new_part_name": child, "gap_mm": clearance,
+                        "cutter": {
+                            "type": "union",
+                            "parts": [
+                                dict(box),
+                                {"type": "box", "center": art._point_mm(column_centre), "size": column_size},
+                                {"type": "cylinder", "start": art._point_mm(knuckle_a),
+                                 "end": art._point_mm(knuckle_b), "radius": round(radius * mm, 3)},
+                            ],
+                        },
+                    }
+                )
             reach = (pz - floor) + max(art._bu(leg["column_size_mm"][analysis["length_axis"]]), across) + art._bu(3.0)
             steps.append(
                 {

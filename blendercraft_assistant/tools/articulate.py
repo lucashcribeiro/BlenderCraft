@@ -164,32 +164,44 @@ def _boolean(target, operation: str, cutters: list) -> float:
     """Apply EXACT booleans between target and world-space bmeshes.
 
     Several cutters go in one boolean through a temporary collection. When
-    that breaks a watertight target, it is redone one cutter at a time.
+    the result breaks a watertight target, it is redone one cutter at a
+    time, and then with the MANIFOLD solver (also exact on watertight input).
     Returns the seconds spent. The cutter bmeshes are not freed.
     """
     start = time.perf_counter()
-    if len(cutters) == 1:
+    was_ok = _mesh_ok(target.data)
+    if not was_ok:
         _boolean_once(target, operation, cutters)
         return time.perf_counter() - start
-    was_ok = _mesh_ok(target.data)
-    backup = target.data.copy() if was_ok else None
+    backup = target.data.copy()
+    attempts = [("EXACT", [cutters])]
+    if len(cutters) > 1:
+        attempts.append(("EXACT", [[c] for c in cutters]))
+    attempts.append(("MANIFOLD", [[c] for c in cutters]))
     try:
-        _boolean_once(target, operation, cutters)
-        if was_ok and not _mesh_ok(target.data):
-            broken = target.data
-            target.data = backup
-            backup = None
-            if broken.users == 0:
-                bpy.data.meshes.remove(broken)
-            for cutter in cutters:
-                _boolean_once(target, operation, [cutter])
+        for n, (solver, groups) in enumerate(attempts):
+            if n:
+                _swap_mesh(target, backup.copy())
+            for group in groups:
+                _boolean_once(target, operation, group, solver)
+            if _mesh_ok(target.data):
+                break
     finally:
-        if backup is not None and backup.users == 0:
+        if backup.users == 0:
             bpy.data.meshes.remove(backup)
     return time.perf_counter() - start
 
 
-def _boolean_once(target, operation: str, cutters: list) -> None:
+def _swap_mesh(obj, mesh) -> None:
+    old = obj.data
+    name = old.name
+    obj.data = mesh
+    if old.users == 0:
+        bpy.data.meshes.remove(old)
+    mesh.name = name
+
+
+def _boolean_once(target, operation: str, cutters: list, solver: str = _SOLVER) -> None:
     collection = bpy.data.collections.new("BC_tmp_cutters")
     bpy.context.scene.collection.children.link(collection)
     temp = []
@@ -202,7 +214,7 @@ def _boolean_once(target, operation: str, cutters: list) -> None:
             temp.append(obj)
         mod = target.modifiers.new("BC_boolean", "BOOLEAN")
         mod.operation = operation
-        mod.solver = _SOLVER
+        mod.solver = solver
         if len(temp) == 1:
             mod.operand_type = "OBJECT"
             mod.object = temp[0]
@@ -665,7 +677,6 @@ def prepare_mesh(
     merge_mm: float = 0.001,
     split_shells: bool = False,
     near_gap_mm: float = 0.3,
-    weld_near: bool = False,
     keep_original: bool = True,
 ) -> dict:
     obj = _get_object(name)
@@ -694,11 +705,9 @@ def prepare_mesh(
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     try:
-        n_verts = len(bm.verts)
-        bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=_bu(merge_mm) / scale)
-        merged = n_verts - len(bm.verts)
-        if merged:
-            steps.append(f"merged {merged} duplicate vertices")
+        # Only open seams are touched: vertices of a watertight surface keep
+        # their exact positions (merging close vertices elsewhere could even
+        # break a good mesh).
         loose = [v for v in bm.verts if not v.link_faces]
         if loose:
             bmesh.ops.delete(bm, geom=loose, context="VERTS")
@@ -706,7 +715,13 @@ def prepare_mesh(
         wire = [e for e in bm.edges if not e.link_faces]
         if wire:
             bmesh.ops.delete(bm, geom=wire, context="EDGES")
-        bmesh.ops.dissolve_degenerate(bm, dist=_bu(1e-5) / scale, edges=bm.edges[:])
+        open_verts = list({v for e in bm.edges if e.is_boundary for v in e.verts})
+        if open_verts:
+            n_verts = len(bm.verts)
+            bmesh.ops.remove_doubles(bm, verts=open_verts, dist=_bu(merge_mm) / scale)
+            merged = n_verts - len(bm.verts)
+            if merged:
+                steps.append(f"merged {merged} duplicate vertices on open seams")
         boundary = [e for e in bm.edges if e.is_boundary]
         if boundary:
             bmesh.ops.holes_fill(bm, edges=boundary, sides=0)
@@ -719,7 +734,7 @@ def prepare_mesh(
         # Overlapping shells break booleans; touching-but-separate shells
         # weld in the slicer. Both are reported.
         comps = _components(bm)
-        overlapping, near, bridges = [], [], []
+        overlapping, near = [], []
         if 1 < len(comps) <= 64:
             trees = []
             for comp in comps:
@@ -745,21 +760,10 @@ def prepare_mesh(
                     gap, _ = _min_gap(trees[i][1], trees[j][1])
                     if gap is not None and gap * _mm() < near_gap_mm:
                         near.append({"shells": [i, j], "gap_mm": round(gap * _mm(), 3)})
-                        if weld_near:
-                            bridge = _bridge_points(trees[i], trees[j], gap + _bu(0.6))
-                            if len(bridge) >= 4:
-                                bridges.append(_hull_bm(bridge))
             for _, sub in trees:
                 sub.free()
     finally:
         bm.free()
-    if bridges:
-        t = time.perf_counter()
-        _boolean(obj, "UNION", bridges)
-        for b in bridges:
-            b.free()
-        steps.append(f"welded {len(bridges)} pair(s) of near shells with bridge solids")
-        timings["weld_s"] = round(time.perf_counter() - t, 2)
     timings["cleanup_s"] = round(time.perf_counter() - t0, 2)
 
     dropped = _drop_islands(obj, 1.0)
@@ -863,17 +867,6 @@ def _drop_islands(obj, max_mm3: float) -> list[float]:
         return dropped
     finally:
         bm.free()
-
-
-def _bridge_points(a, b, reach: float) -> list[Vector]:
-    """Vertices of two shells (tree, bmesh) lying within reach of the other:
-    their hull fills the gap where the shells nearly touch."""
-    points = []
-    for (tree_a, bm_a), (tree_b, _bm_b) in ((a, b), (b, a)):
-        for v in bm_a.verts:
-            if tree_b.find_nearest(v.co, reach)[0] is not None:
-                points.append(v.co.copy())
-    return points
 
 
 def _split_shells(obj) -> list[dict]:
@@ -1293,7 +1286,7 @@ def _figure_report(name, objs, lo, hi, cell, legs, areas, top, k_top, head_sign,
         a, b = by_name.get(f"leg_{end}_left"), by_name.get(f"leg_{end}_right")
         if a and b:
             diff = max(abs(a["column_size_mm"][k] - b["column_size_mm"][k]) for k in (L, W))
-            mirrors.append({"pair": end, "size_difference_mm": round(diff, 2), "ok": diff <= 1.0})
+            mirrors.append({"pair": end, "size_difference_mm": round(diff, 2), "ok": diff <= max(1.0, 1.5 * _to_mm(cell))})
     return {
         "name": name,
         "objects": [o.name for o in objs],
@@ -1321,7 +1314,7 @@ def _figure_report(name, objs, lo, hi, cell, legs, areas, top, k_top, head_sign,
 
 
 def cut_part(name: str, cutter: dict, new_part_name: str, gap_mm: float = 0.3,
-             allow_multiple_shells: bool = False) -> dict:
+             allow_multiple_shells: bool = False, drop_shells_under_mm3: float = 0.0) -> dict:
     obj = _part(name)
     new_part_name = str(new_part_name).strip()
     if not new_part_name:
@@ -1359,17 +1352,28 @@ def cut_part(name: str, cutter: dict, new_part_name: str, gap_mm: float = 0.3,
         if not obj.data.polygons:
             raise ValueError("The cutter swallows the whole part: nothing would remain")
         dropped = {"child": _drop_slivers(child), "parent": _drop_slivers(obj)}
+        limit = _number(drop_shells_under_mm3, "drop_shells_under_mm3", 0.0)
+        if limit > 0:
+            dropped["child"] += _drop_islands(child, limit)
+            dropped["parent"] += _drop_islands(obj, limit)
         report = {"parent": _shell_report(obj), "child": _shell_report(child)}
         problems = [
             f"{label} has {r['components']} shells" for label, r in report.items() if r["components"] != 1
         ] + [f"{label} is not watertight" for label, r in report.items() if not r["manifold"]]
         if problems and not allow_multiple_shells:
+            volumes = {}
+            for label, o in (("parent", obj), ("child", child)):
+                bm = bmesh.new()
+                bm.from_mesh(o.data)
+                bm.transform(o.matrix_world)
+                volumes[label] = [round(v * _mm() ** 3, 2) for v, _ in _component_volumes(bm)][:8]
+                bm.free()
             raise ValueError(
                 "Cut rejected (rolled back): "
                 + "; ".join(problems)
-                + ". Each part must be one watertight shell: use a box/cylinder/"
-                "sphere cutter that encloses only the piece you want, or pass "
-                "allow_multiple_shells."
+                + f". Shell volumes (mm³): {volumes}. Each part must be one watertight "
+                "shell: use a cutter that encloses only the piece you want, drop "
+                "small loose pieces with drop_shells_under_mm3, or pass allow_multiple_shells."
             )
         child["bc_cutter"] = json.dumps(_cutter_to_mm(spec))
         child["bc_cut_gap_mm"] = gap_mm
@@ -1531,13 +1535,82 @@ def _walls_from(tree: BVHTree, point: Vector, first_max: float, dirs=None) -> fl
     return best
 
 
-def _pull_test(parent, child, directions: dict) -> dict:
+def _moving_set(child) -> list:
+    """The child and every mesh that turns with it (its descendants)."""
+    return [child] + [o for o in child.children_recursive if o.type == "MESH"]
+
+
+def _cropped_world(objs, pivot: Vector, radius: float):
+    """One bmesh with the faces of objs within radius of pivot (world)."""
+    out = bmesh.new()
+    for obj in objs:
+        bm = _world_bm(obj)
+        try:
+            crop = _crop(bm, pivot, radius)
+        finally:
+            bm.free()
+        if crop is None:
+            continue
+        mesh = bpy.data.meshes.new("BC_tmp_crop")
+        crop.to_mesh(mesh)
+        crop.free()
+        out.from_mesh(mesh)
+        bpy.data.meshes.remove(mesh)
+    out.normal_update()
+    return out
+
+
+def _obstacles(child, parent) -> list:
+    moving = {o.name for o in _moving_set(child)}
+    out = [parent]
+    for o in bpy.context.scene.objects:
+        if o.type == "MESH" and o.visible_get() and o.name not in moving and o != parent:
+            out.append(o)
+    return out
+
+
+def _sweep_test(parent, child, pivot, axis, start, end, step, radius) -> dict:
+    """Turn the child (and what hangs from it) about the axis, without
+    touching the scene, against the visible meshes within radius of the
+    pivot. Same result shape as joint_test."""
+    static = _cropped_world(_obstacles(child, parent), pivot, radius)
+    moving = _cropped_world(_moving_set(child), pivot, radius)
+    try:
+        static_tree = BVHTree.FromBMesh(static)
+
+        def hits(angle_deg):
+            posed = moving.copy()
+            posed.transform(_rotate_about(pivot, axis, math.radians(angle_deg)))
+            tree = BVHTree.FromBMesh(posed)
+            posed.free()
+            return bool(tree.overlap(static_tree))
+
+        if hits(0.0):
+            return {"free_min": 0.0, "free_max": 0.0, "colliding_at_rest": True,
+                    "collisions": [{"angle": 0.0}], "tested_within_mm": _to_mm(radius)}
+        free, collisions = {}, []
+        for key, limit in (("free_max", end), ("free_min", start)):
+            free[key] = 0.0
+            for angle in joints._sweep_angles(limit, step):
+                if hits(angle):
+                    collisions.append({"angle": angle})
+                    break
+                free[key] = angle
+        return {"free_min": free["free_min"], "free_max": free["free_max"], "colliding_at_rest": False,
+                "collisions": collisions, "tested_within_mm": _to_mm(radius)}
+    finally:
+        static.free()
+        moving.free()
+
+
+def _pull_test(parent, child, directions: dict, pivot: Vector, radius: float) -> dict:
     """How far the child slides along each direction before touching the
     parent (mm, None = more than 3 mm: not retained that way)."""
-    parent_tree = _world_tree(parent)
-    child_bm = _world_bm(child)
+    static = _cropped_world([parent], pivot, radius)
+    child_bm = _cropped_world([child], pivot, radius)
     out = {}
     try:
+        parent_tree = BVHTree.FromBMesh(static)
         for label, d in directions.items():
             out[label] = None
             for dist_mm in (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0):
@@ -1550,13 +1623,17 @@ def _pull_test(parent, child, directions: dict) -> dict:
                     break
     finally:
         child_bm.free()
+        static.free()
     return out
 
 
 def _gap_check(parent, child, pivot: Vector, radius: float) -> dict:
     a, b = _world_bm(parent), _world_bm(child)
     try:
-        gap, approximate = _min_gap(a, b)
+        if len(a.verts) + len(b.verts) > 200_000:
+            gap, approximate = _sampled_gap(a, b, 200_000), True
+        else:
+            gap, approximate = _min_gap(a, b)
         local = None
         # Exact (with edges) near the joint, where the clearances are.
         crop_a = _crop(a, pivot, radius)
@@ -1574,6 +1651,22 @@ def _gap_check(parent, child, pivot: Vector, radius: float) -> dict:
         "local_min_gap_mm": None if local is None else _to_mm(local, 4),
         "approximate": approximate,
     }
+
+
+def _sampled_gap(bm_a, bm_b, budget: int) -> float | None:
+    """Overlap test, then vertex-to-surface distances on a vertex sample."""
+    tree_a, tree_b = BVHTree.FromBMesh(bm_a), BVHTree.FromBMesh(bm_b)
+    if tree_a.overlap(tree_b):
+        return 0.0
+    total = len(bm_a.verts) + len(bm_b.verts)
+    step = max(1, total // budget)
+    best = math.inf
+    for verts, tree in ((bm_a.verts, tree_b), (bm_b.verts, tree_a)):
+        for v in verts[::step]:
+            hit = tree.find_nearest(v.co)
+            if hit[3] is not None:
+                best = min(best, hit[3])
+    return None if best == math.inf else best
 
 
 def _crop(bm, center: Vector, radius: float):
@@ -1630,6 +1723,7 @@ def add_joint(
     if size_mm is not None:
         size_mm = _number(size_mm, "size_mm", 0.0, allow_zero=False)
     use_relief = (joint_type != "cap") if relief is None else bool(relief)
+    built_rho = None
     rho_set = None
     if relief_radius_mm is not None:
         rho_set = _bu(_number(relief_radius_mm, "relief_radius_mm", 0.0, allow_zero=False))
@@ -1687,6 +1781,7 @@ def add_joint(
                     for b in reliefs:
                         b.free()
                     built["relief_radius_mm"] = _to_mm(rho)
+                    built_rho = rho
                 timings["relief_s"] = round(time.perf_counter() - t, 2)
             parent_tree = _world_tree(parent_obj)
             sides = {}
@@ -1793,6 +1888,8 @@ def add_joint(
                     if reliefs:
                         cutters.extend(reliefs)
                         built["relief_radius_mm"] = _to_mm(rho)
+                        built_rho = rho
+                    built_rho = rho
                 _boolean(parent_obj, "DIFFERENCE", cutters)
                 _boolean(child_obj, "UNION", [ball, neck])
             finally:
@@ -1864,6 +1961,7 @@ def add_joint(
             dropped = _drop_slivers(obj)
             if dropped:
                 warnings.append(f"removed slivers from {obj.name}: {dropped} mm³")
+        test_radius = max(check_radius, rho_set or 0.0, built_rho or 0.0) + _bu(5.0)
         t = time.perf_counter()
         gaps = _gap_check(parent_obj, child_obj, p, check_radius)
         timings["measure_s"] = round(time.perf_counter() - t, 2)
@@ -1912,11 +2010,11 @@ def add_joint(
     if test and pivot_name:
         t = time.perf_counter()
         start, end = max(-180.0, rng[0] - 15.0), min(180.0, rng[1] + 15.0)
-        sweep = joints.joint_test(pivot_name, start=start, end=end, step=2.5 if end - start <= 120 else 5.0)
+        sweep = _sweep_test(parent_obj, child_obj, p, a, start, end, 2.5 if end - start <= 120 else 5.0, test_radius)
         result["sweep"] = sweep
         timings["joint_test_s"] = round(time.perf_counter() - t, 2)
         t = time.perf_counter()
-        pulls = _pull_test(parent_obj, child_obj, {"out": u, "+axis": a, "-axis": -a})
+        pulls = _pull_test(parent_obj, child_obj, {"out": u, "+axis": a, "-axis": -a}, p, test_radius)
         result["retention"] = {
             "slide_before_contact_mm": pulls,
             "retained": all(v is not None and v <= 1.5 for v in pulls.values()),
@@ -2282,7 +2380,8 @@ def articulate_figure(name: str, plan=None, dry_run: bool = False) -> dict:
         try:
             if op == "cut":
                 res = cut_part(step["part"], step["cutter"], step["new_part_name"],
-                               step.get("gap_mm", 0.3), step.get("allow_multiple_shells", False))
+                               step.get("gap_mm", 0.3), step.get("allow_multiple_shells", False),
+                               step.get("drop_shells_under_mm3", 0.0))
                 brief = {"child": res["child"], "parts": {
                     k: f"{v['components']} shell(s), manifold={v['manifold']}" for k, v in res["parts"].items()}}
             elif op == "joint":
@@ -2373,9 +2472,10 @@ register_tool(
             "and they rebuild the sculpt (previews only). split_shells makes one object per separate "
             "shell. Reports before/after faces, manifold, shells, dimensions "
             "(mm), overlapping and near shells (closer than near_gap_mm weld "
-            "when printed) and timings. weld_near joins near shells into one "
-            "with a bridge solid where they almost touch (detail elsewhere is "
-            "kept), so the figure can be re-cut with real clearances. Booleans stay fast on 500k faces, so "
+            "when printed) and timings. A leg that is already a "
+            "separate shell becomes its own part with split_shells; "
+            "add_joint (and apply_articulation_template) then open the real "
+            "clearance around it. Booleans stay fast on 500k faces, so "
             "keep the original resolution."
         ),
         input_schema={
@@ -2387,7 +2487,6 @@ register_tool(
                 "merge_mm": {"type": "number"},
                 "split_shells": {"type": "boolean"},
                 "near_gap_mm": {"type": "number"},
-                "weld_near": {"type": "boolean"},
                 "keep_original": {"type": "boolean"},
                 "description": {"type": "string"},
             },
@@ -2401,7 +2500,6 @@ register_tool(
                 float(a.get("merge_mm", 0.001)),
                 bool(a.get("split_shells", False)),
                 float(a.get("near_gap_mm", 0.3)),
-                bool(a.get("weld_near", False)),
                 bool(a.get("keep_original", True)),
             )
         ),
@@ -2456,6 +2554,7 @@ register_tool(
                 "new_part_name": {"type": "string"},
                 "gap_mm": {"type": "number"},
                 "allow_multiple_shells": {"type": "boolean"},
+                "drop_shells_under_mm3": {"type": "number"},
                 "description": {"type": "string"},
             },
             "required": ["name", "cutter", "new_part_name"],
@@ -2463,7 +2562,7 @@ register_tool(
         handler=_wrap(
             lambda a: cut_part(
                 str(a["name"]), a["cutter"], str(a["new_part_name"]), a.get("gap_mm", 0.3),
-                bool(a.get("allow_multiple_shells", False)),
+                bool(a.get("allow_multiple_shells", False)), a.get("drop_shells_under_mm3", 0.0),
             )
         ),
         kind="scene",
@@ -2658,3 +2757,4 @@ register_tool(
 
 # Template tools build on these; imported last so they can use everything above.
 from . import articulation_templates  # noqa: E402,F401
+from . import posing  # noqa: E402,F401
