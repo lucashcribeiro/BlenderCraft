@@ -2,9 +2,11 @@
 
 Owns one conversation and (lazily) one Claude Code process: message queue
 while the agent works, Stop, tool-call limit, change counter, saving and
-resuming. All methods run on Blender's main thread; the process callbacks
-(on_line / on_exit) must be marshalled there before reaching handle_line /
-handle_exit.
+resuming. All methods run on Blender's main thread. spawn() gets callbacks
+bound to the process it creates (on_line / on_exit); the caller must call
+them on the main thread (the runtime posts them through mainthread), and
+output of a process that was replaced or stopped is dropped. handle_line /
+handle_exit feed the current process's output directly (used by tests).
 
 This module must not import bpy.
 """

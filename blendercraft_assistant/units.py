@@ -10,6 +10,9 @@ DISPLAY_UNITS: dict[str, tuple[str, str]] = {
     "FT": ("IMPERIAL", "FEET"),
 }
 
+# Short names of the display units, as the selectors show them.
+UNIT_LABELS: dict[str, str] = {"MM": "mm", "CM": "cm", "M": "m", "IN": "in", "FT": "ft"}
+
 
 def apply_internal_mm(scene) -> None:
     """Set the scene to 1 BU = 1 mm, displayed in millimeters."""

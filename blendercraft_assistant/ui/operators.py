@@ -12,7 +12,7 @@ from ..i18n import t
 from ..tools.dispatch import call_tool
 from ..tools.joints import create_pivot, joint_test, reset
 from ..tools.view import screenshot
-from ..units import DISPLAY_UNITS, set_display_unit
+from ..units import DISPLAY_UNITS, UNIT_LABELS, set_display_unit
 
 # Selected objects described in one "attach selection" block.
 MAX_ATTACHED_OBJECTS = 20
@@ -261,9 +261,6 @@ class BC_OT_approve(Operator):
         return {"FINISHED"}
 
 
-_UNIT_LABELS = {"MM": "mm", "CM": "cm", "M": "m", "IN": "in", "FT": "ft"}
-
-
 class BC_OT_set_unit(Operator):
     bl_idname = "bc.set_unit"
     bl_label = t("unit")
@@ -272,7 +269,7 @@ class BC_OT_set_unit(Operator):
 
     unit: EnumProperty(
         name=t("unit"),
-        items=[(key, _UNIT_LABELS[key], "") for key in DISPLAY_UNITS],
+        items=[(key, UNIT_LABELS[key], "") for key in DISPLAY_UNITS],
     )
 
     def execute(self, context):

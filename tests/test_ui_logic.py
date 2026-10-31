@@ -444,6 +444,15 @@ class OperatorsTest(unittest.TestCase):
         # Deleting from the panel asks first.
         self.assertTrue(hasattr(self.operators.BC_OT_delete_conversation, "invoke"))
 
+    def test_unit_labels_defined_once(self):
+        from blendercraft_assistant import units
+        from blendercraft_assistant.ui import panel
+
+        for module in (panel, self.operators):
+            self.assertFalse(hasattr(module, "_UNIT_LABELS"), module.__name__)
+        items = bpy.ops.bc.set_unit.get_rna_type().properties["unit"].enum_items
+        self.assertEqual({i.identifier: i.name for i in items}, units.UNIT_LABELS)
+
     def test_copy_mcp_command_needs_server(self):
         with mock.patch.object(self.runtime, "server", None):
             self.assertEqual(bpy.ops.bc.copy_mcp_command(), {"CANCELLED"})

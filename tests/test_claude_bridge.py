@@ -97,6 +97,12 @@ class StreamTest(unittest.TestCase):
         self.assertEqual(parse_line(start("tool_use")), [])
         self.assertEqual(parse_line(start("thinking")), [])
 
+    def test_tool_prefix_defined_once(self):
+        from blendercraft_assistant.claude import process, stream
+
+        self.assertFalse(hasattr(stream, "MCP_PREFIX"))
+        self.assertIs(stream.TOOL_PREFIX, process.TOOL_PREFIX)
+
     def test_invalid_line(self):
         self.assertEqual(parse_line("lixo"), [])
         self.assertEqual(parse_line(""), [])

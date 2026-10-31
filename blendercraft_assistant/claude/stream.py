@@ -23,7 +23,7 @@ This module must not import bpy.
 import json
 from dataclasses import dataclass
 
-MCP_PREFIX = "mcp__blendercraft__"
+from .process import TOOL_PREFIX
 
 
 @dataclass
@@ -78,7 +78,7 @@ def _blocks(message) -> list[dict]:
 
 def _tool_name(name) -> str:
     name = name if isinstance(name, str) else ""
-    return name[len(MCP_PREFIX):] if name.startswith(MCP_PREFIX) else name
+    return name[len(TOOL_PREFIX):] if name.startswith(TOOL_PREFIX) else name
 
 
 def _result_text(content) -> str:

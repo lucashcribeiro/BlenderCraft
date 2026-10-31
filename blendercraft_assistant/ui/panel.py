@@ -7,7 +7,7 @@ from bpy.types import Panel
 
 from .. import runtime
 from ..i18n import t
-from ..units import get_display_unit, mm_per_bu
+from ..units import UNIT_LABELS, get_display_unit, mm_per_bu
 from . import operators
 from .text_wrap import strip_markdown, wrap
 
@@ -28,7 +28,6 @@ _TOOL_ICONS = {
     "error": "ERROR",
     "interrupted": "CANCEL",
 }
-_UNIT_LABELS = {"MM": "mm", "CM": "cm", "M": "m", "IN": "in", "FT": "ft"}
 
 
 def _text_lines(layout, context, text: str, alert: bool = False) -> None:
@@ -178,7 +177,7 @@ class VIEW3D_PT_bc_assistant(Panel):
         row = layout.row(align=True)
         row.label(text=t("unit"))
         row.operator_menu_enum(
-            "bc.set_unit", "unit", text=_UNIT_LABELS[get_display_unit(context.scene)]
+            "bc.set_unit", "unit", text=UNIT_LABELS[get_display_unit(context.scene)]
         )
         scale = mm_per_bu(context.scene)
         if scale != 1.0:
@@ -244,7 +243,7 @@ class VIEW3D_PT_bc_joint(Panel):
 def draw_unit_header(self, context) -> None:
     """Display unit selector at the end of the 3D View header."""
     self.layout.operator_menu_enum(
-        "bc.set_unit", "unit", text=_UNIT_LABELS[get_display_unit(context.scene)]
+        "bc.set_unit", "unit", text=UNIT_LABELS[get_display_unit(context.scene)]
     )
 
 
