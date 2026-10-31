@@ -654,6 +654,24 @@ class PanelDrawTest(unittest.TestCase):
         labels = " ".join(self.labels(self.draw(self.panel.VIEW3D_PT_bc_assistant)))
         self.assertIn(i18n.t("claude_login"), labels)
 
+    def test_copy_mcp_command_in_the_panel(self):
+        log = self.draw(self.panel.VIEW3D_PT_bc_assistant)
+        self.assertIn(("operator", "bc.copy_mcp_command", i18n.t("copy_mcp")), log)
+
+    def test_unit_selector_in_the_3d_view_header(self):
+        header = bpy.types.VIEW3D_HT_header
+        funcs = header._dyn_ui_initialize()
+        self.assertEqual(funcs.count(self.panel.draw_unit_header), 1)
+        self.panel.unregister()
+        self.assertNotIn(self.panel.draw_unit_header, funcs)
+        self.panel.register()  # what the cleanup unregisters
+        self.panel.register_header()  # idempotent
+        self.assertEqual(funcs.count(self.panel.draw_unit_header), 1)
+        log = []
+        fake = mock.Mock(layout=FakeLayout(log))
+        self.panel.draw_unit_header(fake, bpy.context)
+        self.assertEqual([e[1] for e in log if e[0] == "operator"], ["bc.set_unit"])
+
     def test_scale_warning_when_file_is_not_in_mm(self):
         from blendercraft_assistant import units
 

@@ -184,6 +184,8 @@ class VIEW3D_PT_bc_assistant(Panel):
         if scale != 1.0:
             _text_lines(layout, context, t("scale_warning", mm=f"{scale:g}"), alert=True)
 
+        layout.operator("bc.copy_mcp_command", text=t("copy_mcp"), icon="COPYDOWN")
+
 
 class VIEW3D_PT_bc_conversations(Panel):
     """Popover listing saved conversations: this file's first."""
@@ -239,6 +241,20 @@ class VIEW3D_PT_bc_joint(Panel):
             _text_lines(layout, context, operators.joint_result)
 
 
+def draw_unit_header(self, context) -> None:
+    """Display unit selector at the end of the 3D View header."""
+    self.layout.operator_menu_enum(
+        "bc.set_unit", "unit", text=_UNIT_LABELS[get_display_unit(context.scene)]
+    )
+
+
+def register_header() -> None:
+    """Add the unit selector to the 3D View header (once)."""
+    header = bpy.types.VIEW3D_HT_header
+    header.remove(draw_unit_header)
+    header.append(draw_unit_header)
+
+
 CLASSES = (VIEW3D_PT_bc_assistant, VIEW3D_PT_bc_conversations, VIEW3D_PT_bc_joint)
 
 
@@ -248,8 +264,10 @@ def register() -> None:
     VIEW3D_PT_bc_joint.bl_category = category
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    register_header()
 
 
 def unregister() -> None:
+    bpy.types.VIEW3D_HT_header.remove(draw_unit_header)
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

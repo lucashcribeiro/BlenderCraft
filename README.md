@@ -79,7 +79,9 @@ O processo do `claude` é encerrado ao fechar o Blender ou ao começar uma nova 
 
 ## Preferências da extensão
 
-Em Preferências, Extensões, BlenderCraft Assistant, dá para indicar o caminho do `claude` (quando ele não está no PATH nem nos lugares usuais), fixar a porta do servidor MCP e copiar o comando `claude mcp add`, que liga um Claude Code do terminal ao mesmo Blender.
+Em Preferências, Extensões, BlenderCraft Assistant, dá para indicar o caminho do `claude` (quando ele não está no PATH nem nos lugares usuais), fixar a porta do servidor MCP e copiar o comando `claude mcp add`, que liga um Claude Code do terminal ao mesmo Blender (o botão **Copiar comando MCP** também fica no painel).
+
+O token do servidor MCP é novo a cada vez que o Blender abre (ou a extensão é religada) e não é gravado em lugar nenhum. Por isso, depois de reiniciar o Blender, copie o comando de novo e rode-o outra vez no terminal; como o nome `blendercraft` já estará registrado, remova o antigo antes com `claude mcp remove blendercraft`.
 
 ## Licença
 
