@@ -324,6 +324,8 @@ def _select_assistant_tab():
                     continue
                 with _override(window, screen, area, region):
                     region.active_panel_category = category
+                # Setting the tab does not redraw the sidebar by itself.
+                region.tag_redraw()
     _tab_attempts += 1
     if pending and _tab_attempts < MAX_TAB_ATTEMPTS:
         return TAB_INTERVAL

@@ -418,6 +418,7 @@ def _stub_area(recorder, kind, ui_type=None, x=0, width=100):
                 type="UI",
                 active_panel_category="Item",
                 is_property_readonly=lambda name: False,
+                tag_redraw=lambda: recorder.sets.append(("redraw", None, recorder.depth)),
             ),
         ],
     )
@@ -515,7 +516,9 @@ class TweakUiGuiBranchTest(unittest.TestCase):
         self.assertEqual(self.ui_region(view).active_panel_category, "Item")
         self.assertIsNone(self.run_tweak([window], tab=True))
         self.assertEqual(self.ui_region(view).active_panel_category, "Assistente")
-        self.assertEqual(self.rec.sets[-1], ("active_panel_category", "Assistente", 1))
+        self.assertEqual(
+            self.rec.sets[-2:], [("active_panel_category", "Assistente", 1), ("redraw", None, 0)]
+        )
 
     def test_tab_waits_until_the_sidebar_has_its_tabs(self):
         view, areas = _factory_layout(self.rec)
