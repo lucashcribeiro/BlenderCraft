@@ -411,11 +411,11 @@ class RuntimeSessionTest(RuntimeTestBase):
             scene.unit_settings.scale_length = 1.0
             session.send("e agora?")
         self.assertEqual(
-            sent[0], "[BlenderCraft: unidade exibida = mm · 1 BU = 1 mm · idioma = pt]\noi"
+            sent[0], "[BlenderCraft: unidade exibida = mm · 1 BU = 1 mm · idioma da interface = pt]\noi"
         )
         self.assertEqual(
             sent[1],
-            "[BlenderCraft: unidade exibida = in · 1 BU = 1000 mm · idioma = pt]\ne agora?",
+            "[BlenderCraft: unidade exibida = in · 1 BU = 1000 mm · idioma da interface = pt]\ne agora?",
         )
 
     def test_spawn_passes_the_file_scale_to_the_prompt(self):

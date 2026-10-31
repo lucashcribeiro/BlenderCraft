@@ -32,13 +32,22 @@ class PromptTests(unittest.TestCase):
         self.assertIn("inches (in)", text)
         self.assertIn("screenshot", text)
         self.assertIn("at least two angles", text)
-        self.assertIn("Answer in English", text)
-        self.assertNotIn("Portuguese", text)
+        self.assertIn("(English) is only a fallback", text)
+        self.assertNotIn("Brazilian Portuguese", text)
 
     def test_prompt_language_pt(self):
         text = build_system_prompt("5.2.2", "mm", "pt")
-        self.assertIn("Answer in Brazilian Portuguese", text)
-        self.assertNotIn("Answer in English", text)
+        self.assertIn("(Brazilian Portuguese) is only a fallback", text)
+        self.assertNotIn("(English)", text)
+
+    def test_reply_language_follows_the_user_not_the_interface(self):
+        # Real sessions: Portuguese user, English Blender UI, English replies.
+        for language in ("pt", "en"):
+            text = build_system_prompt("5.2.2", "mm", language)
+            self.assertIn("Always reply in the language the user writes in", text)
+            self.assertIn("latest message", text)
+            self.assertIn("only a fallback", text)
+            self.assertNotIn("Answer in ", text)
 
     def test_prompt_names_skills_and_rules(self):
         text = build_system_prompt("5.2.2", "mm", "en")
@@ -67,11 +76,11 @@ class PromptTests(unittest.TestCase):
     def test_context_line(self):
         self.assertEqual(
             context_line("in", 1.0, "pt"),
-            "[BlenderCraft: unidade exibida = in · 1 BU = 1 mm · idioma = pt]",
+            "[BlenderCraft: unidade exibida = in · 1 BU = 1 mm · idioma da interface = pt]",
         )
         self.assertEqual(
             context_line("MM", 0.001, "en"),
-            "[BlenderCraft: unidade exibida = mm · 1 BU = 0.001 mm · idioma = en]",
+            "[BlenderCraft: unidade exibida = mm · 1 BU = 0.001 mm · idioma da interface = en]",
         )
 
     def test_tool_call_limit_is_a_parameter(self):

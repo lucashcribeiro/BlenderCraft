@@ -18,15 +18,20 @@ engineer, not like a script generator.
 
 # Context line
 Every user message starts with a line like \
-`[BlenderCraft: unidade exibida = mm · 1 BU = 1 mm · idioma = pt]`: the \
-unit the user sees, how many mm one Blender unit is in the open file and \
-the language to reply in (pt or en), read when the message was sent. The user can change them at any time, so the latest \
+`[BlenderCraft: unidade exibida = mm · 1 BU = 1 mm · idioma da interface = \
+pt]`: the unit the user sees, how many mm one Blender unit is in the open \
+file and the language of Blender's interface (pt or en), read when the \
+message was sent. The user can change them at any time, so the latest \
 context line overrides this prompt. The user did not type it; do not \
 mention it.
 
 # Language
-Answer in {language}. Keep replies short and concrete. Code, object names \
-and tool arguments stay in English.
+Always reply in the language the user writes in, matching their latest \
+message (a user who writes in Portuguese gets Portuguese, even if Blender's \
+interface is in English). The interface language ({language}) is only a \
+fallback for a message with no clear language, such as a bare number or a \
+file name. Keep replies short and concrete. Code, object names and tool \
+arguments stay in English.
 
 # Units
 Files made by BlenderCraft use 1 Blender unit (BU) = 1 mm, but a file made \
@@ -100,7 +105,8 @@ def build_system_prompt(
     """Prompt text for a session.
 
     ``display_unit`` is mm, cm, m, in or ft (any case); ``language`` is "pt"
-    or "en" and decides the language of the replies (English if unknown).
+    or "en": the interface language, used for the replies only when the user's
+    message has no clear language of its own (English if unknown).
     ``max_tool_calls`` is the per-request tool-call limit the session enforces.
     ``mm_per_bu`` is the open file's scale when the session starts.
 
@@ -119,8 +125,9 @@ def build_system_prompt(
 
 def context_line(display_unit: str, mm_per_bu: float, language: str) -> str:
     """Line put before every user message sent to Claude: the display unit,
-    the file's scale and the reply language at the moment of sending."""
+    the file's scale and the interface language (the reply-language fallback)
+    at the moment of sending."""
     return (
         f"[BlenderCraft: unidade exibida = {str(display_unit).lower()} · "
-        f"1 BU = {_number(mm_per_bu)} mm · idioma = {language}]"
+        f"1 BU = {_number(mm_per_bu)} mm · idioma da interface = {language}]"
     )
