@@ -10,6 +10,25 @@ axis, the pivot point (mm, world) and the clearance first (see
 blendercraft:printing: 0.3-0.5 mm per side for print-in-place, 0.2-0.3 mm for
 assembled parts).
 
+## Hard rules (a joint that breaks one of these welds in the slicer)
+1. Cut joints for real: holes, sockets and slots are EXACT Boolean
+   DIFFERENCES in the body. A "hole" modelled as a solid, or a ball and a
+   socket left as overlapping solids, fuses when sliced.
+2. Every print part is one watertight shell (`mesh_topology`: 1 component,
+   manifold, not inverted); a part made of overlapping shells is wrong.
+3. Clearance per side, on EVERY pair that faces each other (pin and hole,
+   ball and socket wall, shaft and slot opening, cap and its seat): 0.30 mm
+   print-in-place, 0.20 mm parts assembled after printing. Never scale
+   clearances with the model.
+4. Measure, do not assume: `measure(a, b)` min_gap >= clearance - 0.02 for
+   each joint, then `joint_test` over the designed range.
+5. Mirrored parts (left/right legs) are made with a real mirror of one
+   side, never edited separately; check their volumes are equal.
+For a part that turns on a curved body (legs, heads, tails), subtract the
+part's swept volume inflated by the clearance from its neighbour (see
+blendercraft:organic-modeling, articulated recipe): free range by
+construction.
+
 ## Recipe: hinge pin (two knuckles on one pin)
 1. Model the parts in their closed or rest pose, as separate objects, and name
    them (`Arm`, `Base`).

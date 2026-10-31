@@ -8,6 +8,11 @@ description: Use when creating or judging how a 3D model looks (any request for 
 Aim for an object that looks intentional. Decide the design before modelling;
 judge it with screenshots afterwards.
 
+Organic or artistic subjects (animals, pets, characters, figurines, toys,
+plants): follow blendercraft:quality-workflow (dossier, stages, gates) and
+build with blendercraft:organic-modeling. Never assemble them from separate
+primitives. This skill covers product-like and hard-surface objects.
+
 ## Plan first (three lines)
 1. Purpose and the one dominant form (a block, a wedge, a cylinder).
 2. Secondary forms that serve it (a recess, a lip, a foot) and what stays
