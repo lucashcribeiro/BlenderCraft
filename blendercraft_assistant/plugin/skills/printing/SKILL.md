@@ -77,5 +77,22 @@ broken meshes.
 ## Export
 Use 3MF for multi-colour or multi-part, STL for single colour. One object per
 printable part, named clearly; for multi-colour 3MF, one object per colour (the
-export reads only the first material slot of each object). Do not export helper objects (cutters, pivots,
-empties, reference guides): hide or delete them first.
+export reads only the first material slot of each object).
+
+`export_file` checks 3MF and STL before writing and returns `check`:
+- Cutters and helpers are left out by default (collections BC_cutters,
+  BC_backup, helpers; names BC_cut*, BC_off*, BC_Pivo*, BC_plan*, *furo*,
+  *cutter*; Boolean modifier operands). `include_helpers: true` only when the
+  user really wants them printed.
+- `check.report` lists overlapping pieces ("the slicer will fuse them"),
+  colour inserts and non-manifold meshes. ALWAYS show these lines to the user
+  and say how to fix each one: union a male joint part (ball, pin, cap) into
+  its host with a boolean, subtract a hole cutter, repair a non-manifold mesh.
+  Use `strict: true` to refuse the export while pieces overlap.
+- 3MF `group: "pieces"` (default) writes one Bambu Studio object per print
+  piece with its parts inside, at the assembled positions, one extruder per
+  distinct colour. A piece is an object plus its colour-insert children
+  (pads, toes, eyes, or custom property `bc_role = "insert"`), or all objects
+  sharing a `bc_piece` custom property. Parent inserts to their host (or set
+  `bc_piece`) so they stay in its piece. `group: "objects"` is the old layout,
+  one 3MF object per Blender object.
