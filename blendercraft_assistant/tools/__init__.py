@@ -15,6 +15,7 @@ _MODULES = (
     "files",
     "view",
     "joints",
+    "articulate",
     "gen3d",
 )
 

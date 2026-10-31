@@ -1,0 +1,2286 @@
+"""Articulate an existing figure: prepare the mesh, analyze it, cut it into
+parts and build real print-in-place joints between the parts.
+
+Every length in the tool arguments and results is in millimeters (converted
+with units.mm_per_bu); angles are degrees. Geometry is built in world space
+and applied with EXACT booleans, so a part may carry any transform.
+
+Joint rules (the user's dossier): clearances are absolute, never scaled with
+the figure: 0.30 mm per side for print-in-place, 0.20 mm for assembled parts.
+Male and female parts never overlap: every hole, socket and relief is a real
+subtraction, and add_joint measures the result and refuses (rolling back)
+when a gap is under clearance - 0.02 mm.
+"""
+
+import json
+import math
+import time
+
+import bmesh
+import bpy
+from mathutils import Matrix, Vector
+from mathutils.bvhtree import BVHTree
+
+from ..units import mm_per_bu
+from . import joints
+from .base import Tool, json_result, register_tool
+from .inspect import _evaluated_world_mesh, _get_object, _min_gap
+from .topology import _count_components, mesh_topology
+
+# A measured gap may be this much under the clearance (tessellation).
+_GAP_TOLERANCE_MM = 0.02
+# Thinnest wall left around sockets, holes and pin anchors.
+_MIN_WALL_MM = 1.2
+# Segments of the round primitives: a 48-gon deviates 0.006 mm from a
+# 3 mm circle, far under the gap tolerance.
+_SEGMENTS = 48
+# Largest angle between two rotated copies of a swept relief.
+_SWEEP_STEP_DEG = 3.0
+_SOLVER = "EXACT"
+_JOINT_TYPES = ("ball", "pin", "cap")
+_DEFAULT_RANGE = {"ball": 30.0, "pin": 30.0, "cap": 10.0}
+
+
+# ---------------------------------------------------------------- units
+
+
+def _mm() -> float:
+    return mm_per_bu(bpy.context.scene)
+
+
+def _bu(value_mm: float) -> float:
+    return value_mm / _mm()
+
+
+def _to_mm(value_bu: float, digits: int = 3) -> float:
+    return round(value_bu * _mm(), digits)
+
+
+def _point_mm(v) -> list[float]:
+    return [_to_mm(c) for c in v]
+
+
+def _number(value, name: str, minimum: float | None = None, allow_zero=True) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number, got {value!r}") from None
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be finite")
+    if minimum is not None:
+        if number < minimum or (not allow_zero and number == minimum):
+            relation = ">=" if allow_zero else ">"
+            raise ValueError(f"{name} must be {relation} {minimum}, got {number}")
+    return number
+
+
+def _vec_mm(value, name: str) -> Vector:
+    """A point given in mm, returned in Blender units."""
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError(f"{name} must be a list of three numbers (mm)")
+    return Vector([_bu(_number(c, name)) for c in value])
+
+
+def _direction(value, name: str) -> Vector:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError(f"{name} must be a list of three numbers")
+    v = Vector([_number(c, name) for c in value])
+    if v.length < 1e-9:
+        raise ValueError(f"{name} must not be the zero vector")
+    return v.normalized()
+
+
+# ---------------------------------------------------------------- objects
+
+
+def _part(name: str):
+    obj = _get_object(str(name))
+    if obj.type != "MESH":
+        raise ValueError(f"Object is not a mesh: {obj.name}")
+    if obj.modifiers:
+        raise ValueError(
+            f"{obj.name} has modifiers ({', '.join(m.name for m in obj.modifiers)}); "
+            "apply them first (prepare_mesh applies them)"
+        )
+    if not obj.data.polygons:
+        raise ValueError(f"{obj.name} has no faces")
+    return obj
+
+
+def _world_bm(obj) -> bmesh.types.BMesh:
+    bpy.context.view_layer.update()
+    bm = _evaluated_world_mesh(obj)
+    if obj.matrix_world.determinant() < 0:
+        bmesh.ops.reverse_faces(bm, faces=bm.faces[:])
+    bm.normal_update()
+    return bm
+
+
+def _world_tree(obj) -> BVHTree:
+    bm = _world_bm(obj)
+    try:
+        return BVHTree.FromBMesh(bm)
+    finally:
+        bm.free()
+
+
+def _new_object_like(source, name: str, mesh):
+    obj = bpy.data.objects.new(name, mesh)
+    for collection in source.users_collection or [bpy.context.scene.collection]:
+        collection.objects.link(obj)
+    obj.matrix_world = source.matrix_world.copy()
+    return obj
+
+
+def _apply_modifier(obj, mod) -> None:
+    """Replace obj's mesh by its evaluated mesh, then drop the modifier."""
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    new = bpy.data.meshes.new_from_object(
+        obj.evaluated_get(depsgraph), preserve_all_data_layers=True, depsgraph=depsgraph
+    )
+    old = obj.data
+    obj.modifiers.remove(mod)
+    name = old.name
+    obj.data = new
+    if old.users == 0:
+        bpy.data.meshes.remove(old)
+    new.name = name
+
+
+def _boolean(target, operation: str, cutters: list) -> float:
+    """Apply one EXACT boolean between target and world-space bmeshes.
+
+    Several cutters go in a temporary collection (one boolean). Returns the
+    seconds spent. The cutter bmeshes are not freed.
+    """
+    collection = bpy.data.collections.new("BC_tmp_cutters")
+    bpy.context.scene.collection.children.link(collection)
+    temp = []
+    try:
+        for i, bm in enumerate(cutters):
+            mesh = bpy.data.meshes.new(f"BC_tmp_cutter_{i}")
+            bm.to_mesh(mesh)
+            obj = bpy.data.objects.new(mesh.name, mesh)
+            collection.objects.link(obj)
+            temp.append(obj)
+        mod = target.modifiers.new("BC_boolean", "BOOLEAN")
+        mod.operation = operation
+        mod.solver = _SOLVER
+        if len(temp) == 1:
+            mod.operand_type = "OBJECT"
+            mod.object = temp[0]
+        else:
+            mod.operand_type = "COLLECTION"
+            mod.collection = collection
+        start = time.perf_counter()
+        _apply_modifier(target, mod)
+        return time.perf_counter() - start
+    finally:
+        for obj in temp:
+            mesh = obj.data
+            bpy.data.objects.remove(obj, do_unlink=True)
+            bpy.data.meshes.remove(mesh)
+        bpy.data.collections.remove(collection)
+
+
+def _bm_boolean(bm, operation: str, cutters: list) -> bmesh.types.BMesh:
+    """Boolean between small world-space bmeshes; returns a new bmesh."""
+    mesh = bpy.data.meshes.new("BC_tmp_operand")
+    bm.to_mesh(mesh)
+    obj = bpy.data.objects.new(mesh.name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    try:
+        _boolean(obj, operation, cutters)
+        out = bmesh.new()
+        out.from_mesh(obj.data)
+        return out
+    finally:
+        mesh = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        bpy.data.meshes.remove(mesh)
+
+
+class _Snapshot:
+    """Mesh copies of parts, to roll a failed operation back."""
+
+    def __init__(self, objs):
+        self.saved = [(o, o.data.copy()) for o in objs]
+        self.created: list = []
+
+    def restore(self) -> None:
+        for obj in self.created:
+            if obj.name in bpy.data.objects:
+                data = obj.data
+                bpy.data.objects.remove(obj, do_unlink=True)
+                if data is not None and getattr(data, "users", 1) == 0:
+                    bpy.data.meshes.remove(data)
+        for obj, mesh in self.saved:
+            old = obj.data
+            obj.data = mesh
+            if old.users == 0:
+                bpy.data.meshes.remove(old)
+        self.saved = []
+
+    def discard(self) -> None:
+        for _, mesh in self.saved:
+            if mesh.users == 0:
+                bpy.data.meshes.remove(mesh)
+        self.saved = []
+
+
+# ---------------------------------------------------------------- primitives
+# All in Blender units, world space. outer=True circumscribes the polygonal
+# approximation (every face at or beyond the nominal radius): used for
+# holes and sockets, while male parts are inscribed. Gaps are therefore
+# never smaller than designed.
+
+
+def _sphere_bm(center, radius: float, outer: bool = False) -> bmesh.types.BMesh:
+    if outer:
+        radius /= math.cos(math.sqrt(2.0) * math.pi / _SEGMENTS)
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(
+        bm,
+        u_segments=_SEGMENTS,
+        v_segments=_SEGMENTS // 2,
+        radius=radius,
+        matrix=Matrix.Translation(center),
+    )
+    return bm
+
+
+def _axis_matrix(direction: Vector) -> Matrix:
+    return Vector((0.0, 0.0, 1.0)).rotation_difference(direction).to_matrix().to_4x4()
+
+
+def _cylinder_bm(p0, p1, radius: float, outer: bool = False) -> bmesh.types.BMesh:
+    axis = Vector(p1) - Vector(p0)
+    if axis.length < 1e-9:
+        raise ValueError("cylinder start and end must differ")
+    if outer:
+        radius /= math.cos(math.pi / _SEGMENTS)
+    bm = bmesh.new()
+    matrix = Matrix.Translation((Vector(p0) + Vector(p1)) / 2) @ _axis_matrix(axis.normalized())
+    bmesh.ops.create_cone(
+        bm,
+        cap_ends=True,
+        cap_tris=False,
+        segments=_SEGMENTS,
+        radius1=radius,
+        radius2=radius,
+        depth=axis.length,
+        matrix=matrix,
+    )
+    return bm
+
+
+def _box_bm(center, size, rotation: Matrix | None = None) -> bmesh.types.BMesh:
+    bm = bmesh.new()
+    rot = (rotation or Matrix.Identity(3)).to_4x4()
+    matrix = Matrix.Translation(center) @ rot @ Matrix.Diagonal((*size, 1.0))
+    bmesh.ops.create_cube(bm, size=1.0, matrix=matrix)
+    return bm
+
+
+def _hull_bm(points) -> bmesh.types.BMesh:
+    """Convex hull of points as a closed bmesh."""
+    bm = bmesh.new()
+    verts = [bm.verts.new(p) for p in points]
+    if len(verts) < 4:
+        bm.free()
+        raise ValueError("not enough points for a hull")
+    result = bmesh.ops.convex_hull(bm, input=verts, use_existing_faces=False)
+    junk = {g for g in result["geom_interior"] + result["geom_unused"] if isinstance(g, bmesh.types.BMVert)}
+    if junk:
+        bmesh.ops.delete(bm, geom=list(junk), context="VERTS")
+    loose = [v for v in bm.verts if not v.link_faces]
+    if loose:
+        bmesh.ops.delete(bm, geom=loose, context="VERTS")
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    return bm
+
+
+def _hull_points(points) -> list[Vector]:
+    bm = _hull_bm(points)
+    try:
+        return [v.co.copy() for v in bm.verts]
+    finally:
+        bm.free()
+
+
+def _ball_offsets(radius: float) -> list[Vector]:
+    """Points whose hull contains a ball of the given radius."""
+    bm = bmesh.new()
+    bmesh.ops.create_icosphere(bm, subdivisions=2, radius=1.0)
+    bm.faces.ensure_lookup_table()
+    inner = min(abs(f.calc_center_median().dot(f.normal)) for f in bm.faces if f.normal.length)
+    points = [v.co.copy() * (radius / inner) for v in bm.verts]
+    bm.free()
+    return points
+
+
+# ---------------------------------------------------------------- cutters
+
+
+def _parse_cutter(spec, depth: int = 0) -> dict:
+    """Validate a cutter given in mm; returns it in BU (internal form)."""
+    if not isinstance(spec, dict) or "type" not in spec:
+        raise ValueError(
+            "cutter must be an object with a type: plane, box, cylinder, sphere or union"
+        )
+    kind = str(spec["type"]).lower()
+    if kind == "plane":
+        return {
+            "type": "plane",
+            "point": _vec_mm(spec.get("point"), "cutter.point"),
+            "normal": _direction(spec.get("normal"), "cutter.normal"),
+        }
+    if kind == "box":
+        size = spec.get("size")
+        if not isinstance(size, (list, tuple)) or len(size) != 3:
+            raise ValueError("box cutter needs size: [x, y, z] in mm")
+        rotation = spec.get("rotation_deg") or [0.0, 0.0, 0.0]
+        if not isinstance(rotation, (list, tuple)) or len(rotation) != 3:
+            raise ValueError("box rotation_deg must be [x, y, z] degrees")
+        from mathutils import Euler
+
+        return {
+            "type": "box",
+            "center": _vec_mm(spec.get("center"), "cutter.center"),
+            "size": Vector([_bu(_number(s, "cutter.size", 0.0, allow_zero=False)) for s in size]),
+            "rotation": Euler([math.radians(_number(r, "rotation_deg")) for r in rotation]).to_matrix(),
+        }
+    if kind == "cylinder":
+        start = _vec_mm(spec.get("start"), "cutter.start")
+        end = _vec_mm(spec.get("end"), "cutter.end")
+        if (end - start).length < 1e-9:
+            raise ValueError("cylinder cutter start and end must differ")
+        return {
+            "type": "cylinder",
+            "start": start,
+            "end": end,
+            "radius": _bu(_number(spec.get("radius"), "cutter.radius", 0.0, allow_zero=False)),
+        }
+    if kind == "sphere":
+        return {
+            "type": "sphere",
+            "center": _vec_mm(spec.get("center"), "cutter.center"),
+            "radius": _bu(_number(spec.get("radius"), "cutter.radius", 0.0, allow_zero=False)),
+        }
+    if kind == "union":
+        parts = spec.get("parts")
+        if depth > 0:
+            raise ValueError("a union cutter cannot contain another union")
+        if not isinstance(parts, list) or not 1 <= len(parts) <= 8:
+            raise ValueError("union cutter needs parts: a list of 1 to 8 cutters")
+        return {"type": "union", "parts": [_parse_cutter(p, depth + 1) for p in parts]}
+    raise ValueError(f"Unknown cutter type {kind!r}: use plane, box, cylinder, sphere or union")
+
+
+def _cutter_prims(cutter: dict) -> list[dict]:
+    return cutter["parts"] if cutter["type"] == "union" else [cutter]
+
+
+def _prim_bm(prim: dict, dilate: float, reach: float, around: Vector) -> bmesh.types.BMesh:
+    """Mesh of a primitive grown by ``dilate`` (BU). Planes become a box of
+    side ``reach`` around ``around``."""
+    kind = prim["type"]
+    if kind == "plane":
+        n = prim["normal"]
+        point = prim["point"] - n * dilate
+        foot = around - n * (around - point).dot(n)
+        center = foot + n * (reach / 2)
+        rotation = _axis_matrix(n).to_3x3()
+        return _box_bm(center, (reach, reach, reach), rotation)
+    if kind == "box":
+        size = prim["size"] + Vector((2 * dilate,) * 3)
+        return _box_bm(prim["center"], size, prim["rotation"])
+    if kind == "cylinder":
+        axis = (prim["end"] - prim["start"]).normalized()
+        return _cylinder_bm(
+            prim["start"] - axis * dilate,
+            prim["end"] + axis * dilate,
+            prim["radius"] + dilate,
+            outer=dilate > 0,
+        )
+    if kind == "sphere":
+        return _sphere_bm(prim["center"], prim["radius"] + dilate, outer=dilate > 0)
+    raise ValueError(f"unknown primitive {kind}")
+
+
+def _cutter_to_mm(cutter: dict) -> dict:
+    kind = cutter["type"]
+    if kind == "union":
+        return {"type": "union", "parts": [_cutter_to_mm(p) for p in cutter["parts"]]}
+    out = {"type": kind}
+    for key, value in cutter.items():
+        if key == "type":
+            continue
+        if key == "rotation":
+            out["rotation_deg"] = [round(math.degrees(a), 4) for a in value.to_euler()]
+        elif key == "normal":
+            out[key] = [round(c, 6) for c in value]
+        elif isinstance(value, Vector):
+            out[key] = _point_mm(value)
+        else:
+            out[key] = _to_mm(value)
+    return out
+
+
+def _reach(obj) -> tuple[float, Vector]:
+    corners = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
+    lo = Vector([min(c[i] for c in corners) for i in range(3)])
+    hi = Vector([max(c[i] for c in corners) for i in range(3)])
+    return 4.0 * (hi - lo).length + _bu(10.0), (lo + hi) / 2
+
+
+# ---------------------------------------------------------------- analysis helpers
+
+
+def _components(bm) -> list[list]:
+    """Vertex lists of the connected components."""
+    bm.verts.index_update()
+    seen = [False] * len(bm.verts)
+    out = []
+    for start in bm.verts:
+        if seen[start.index]:
+            continue
+        seen[start.index] = True
+        stack, comp = [start], []
+        while stack:
+            v = stack.pop()
+            comp.append(v)
+            for e in v.link_edges:
+                o = e.other_vert(v)
+                if not seen[o.index]:
+                    seen[o.index] = True
+                    stack.append(o)
+        out.append(comp)
+    return out
+
+
+def _component_volumes(bm) -> list[tuple[float, list]]:
+    """(volume BU³, faces) per connected component, largest first."""
+    out = []
+    for comp in _components(bm):
+        faces = {f for v in comp for f in v.link_faces}
+        volume = 0.0
+        for f in faces:
+            verts = [v.co for v in f.verts]
+            for i in range(1, len(verts) - 1):
+                volume += verts[0].dot(verts[i].cross(verts[i + 1])) / 6.0
+        out.append((abs(volume), list(faces)))
+    out.sort(key=lambda item: -item[0])
+    return out
+
+
+def _drop_slivers(obj, min_fraction: float = 1e-3) -> list[float]:
+    """Remove boolean slivers (components under min_fraction of the part's
+    volume and under 1 mm³). Returns the dropped volumes in mm³."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    try:
+        comps = _component_volumes(bm)
+        if len(comps) <= 1:
+            return []
+        total = sum(v for v, _ in comps)
+        mm3 = _mm() ** 3
+        dropped, kill = [], set()
+        for volume, faces in comps[1:]:
+            if volume < total * min_fraction and volume * mm3 < 1.0:
+                dropped.append(round(volume * mm3, 4))
+                kill.update(faces)
+        if kill:
+            verts = {v for f in kill for v in f.verts}
+            bmesh.ops.delete(bm, geom=list(verts), context="VERTS")
+            bm.to_mesh(obj.data)
+            obj.data.update()
+        return dropped
+    finally:
+        bm.free()
+
+
+def _shell_report(obj) -> dict:
+    topo = mesh_topology(obj.name)
+    return {
+        "components": topo["components"],
+        "manifold": topo["manifold"],
+        "faces": topo["faces"],
+        "volume_mm3": round(topo["volume_mm3"], 2),
+    }
+
+
+def _ray_hits(tree: BVHTree, origin: Vector, direction: Vector, limit: float = 1e6) -> list[float]:
+    """Distances of every surface crossing along a ray."""
+    hits, travelled, eps = [], 0.0, _bu(1e-4)
+    o = origin.copy()
+    for _ in range(64):
+        loc, _n, _i, dist = tree.ray_cast(o, direction, limit - travelled)
+        if loc is None:
+            break
+        travelled += dist + eps
+        hits.append(travelled - eps)
+        o = loc + direction * eps
+    return hits
+
+
+def _inside(tree: BVHTree, point: Vector) -> bool:
+    """Point-in-mesh by ray parity, voting over three directions."""
+    votes = 0
+    for d in (Vector((0.31, 0.52, 0.79)), Vector((-0.6, 0.71, -0.36)), Vector((0.12, -0.83, 0.54))):
+        votes += len(_ray_hits(tree, point, d.normalized())) % 2
+    return votes >= 2
+
+
+def _perpendicular_dirs(axis: Vector, count: int = 24) -> list[Vector]:
+    base = axis.orthogonal().normalized()
+    other = axis.cross(base).normalized()
+    return [
+        (base * math.cos(2 * math.pi * k / count) + other * math.sin(2 * math.pi * k / count))
+        for k in range(count)
+    ]
+
+
+def _sphere_dirs(count: int = 200) -> list[Vector]:
+    golden = math.pi * (3 - math.sqrt(5))
+    out = []
+    for k in range(count):
+        z = 1 - 2 * (k + 0.5) / count
+        r = math.sqrt(max(0.0, 1 - z * z))
+        out.append(Vector((r * math.cos(golden * k), r * math.sin(golden * k), z)))
+    return out
+
+
+def _rotate_about(point: Vector, axis: Vector, angle: float):
+    rot = Matrix.Rotation(angle, 4, axis)
+    return Matrix.Translation(point) @ rot @ Matrix.Translation(-point)
+
+
+def _sweep_angles(range_deg: float) -> list[float]:
+    if range_deg <= 0:
+        return [0.0]
+    steps = max(1, math.ceil(2 * range_deg / _SWEEP_STEP_DEG))
+    return [math.radians(-range_deg + 2 * range_deg * k / steps) for k in range(steps + 1)]
+
+
+def _swept_hull(points, pivot: Vector, axis: Vector, range_deg: float) -> bmesh.types.BMesh:
+    base = _hull_points(points)
+    swept = []
+    for angle in _sweep_angles(range_deg):
+        m = _rotate_about(pivot, axis, angle)
+        swept.extend(m @ p for p in base)
+    return _hull_bm(swept)
+
+
+# ---------------------------------------------------------------- prepare_mesh
+
+
+def prepare_mesh(
+    name: str,
+    target_faces: int | None = None,
+    voxel_mm: float | None = None,
+    merge_mm: float = 0.001,
+    split_shells: bool = False,
+    near_gap_mm: float = 0.3,
+) -> dict:
+    obj = _get_object(name)
+    if obj.type != "MESH":
+        raise ValueError(f"Object is not a mesh: {obj.name}")
+    if target_faces is not None and int(target_faces) < 1000:
+        raise ValueError("target_faces must be at least 1000")
+    if voxel_mm is not None and not 0.02 <= float(voxel_mm) <= 5.0:
+        raise ValueError("voxel_mm must be between 0.02 and 5 mm")
+    if not 0.0 <= float(merge_mm) <= 0.1:
+        raise ValueError("merge_mm must be between 0 and 0.1 mm")
+    timings, steps = {}, []
+    t0 = time.perf_counter()
+    for mod in list(obj.modifiers):
+        label = mod.name
+        _apply_modifier(obj, mod)
+        steps.append(f"applied modifier {label}")
+    before = _shell_report(obj)
+    before["dimensions_mm"] = _point_mm(obj.dimensions)
+
+    # Cleanup in object space; distances scale with the object's scale.
+    scale = max(obj.matrix_world.to_scale()) or 1.0
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    try:
+        n_verts = len(bm.verts)
+        bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=_bu(merge_mm) / scale)
+        merged = n_verts - len(bm.verts)
+        if merged:
+            steps.append(f"merged {merged} duplicate vertices")
+        loose = [v for v in bm.verts if not v.link_faces]
+        if loose:
+            bmesh.ops.delete(bm, geom=loose, context="VERTS")
+            steps.append(f"removed {len(loose)} loose vertices")
+        wire = [e for e in bm.edges if not e.link_faces]
+        if wire:
+            bmesh.ops.delete(bm, geom=wire, context="EDGES")
+        bmesh.ops.dissolve_degenerate(bm, dist=_bu(1e-5) / scale, edges=bm.edges[:])
+        boundary = [e for e in bm.edges if e.is_boundary]
+        if boundary:
+            bmesh.ops.holes_fill(bm, edges=boundary, sides=0)
+            steps.append(f"filled holes ({len(boundary)} boundary edges)")
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+        if bm.calc_volume(signed=True) < 0:
+            bmesh.ops.reverse_faces(bm, faces=bm.faces[:])
+        bm.to_mesh(obj.data)
+        obj.data.update()
+        # Overlapping shells break booleans; touching-but-separate shells
+        # weld in the slicer. Both are reported.
+        comps = _components(bm)
+        overlapping, near = [], []
+        if 1 < len(comps) <= 64:
+            trees = []
+            for comp in comps:
+                faces = {f for v in comp for f in v.link_faces}
+                sub = bmesh.new()
+                vmap = {}
+                for f in faces:
+                    vs = []
+                    for v in f.verts:
+                        if v not in vmap:
+                            vmap[v] = sub.verts.new(obj.matrix_world @ v.co)
+                        vs.append(vmap[v])
+                    try:
+                        sub.faces.new(vs)
+                    except ValueError:
+                        pass
+                trees.append((BVHTree.FromBMesh(sub), sub))
+            for i in range(len(trees)):
+                for j in range(i + 1, len(trees)):
+                    if trees[i][0].overlap(trees[j][0]):
+                        overlapping.append([i, j])
+                        continue
+                    gap, _ = _min_gap(trees[i][1], trees[j][1])
+                    if gap is not None and gap * _mm() < near_gap_mm:
+                        near.append({"shells": [i, j], "gap_mm": round(gap * _mm(), 3)})
+            for _, sub in trees:
+                sub.free()
+    finally:
+        bm.free()
+    timings["cleanup_s"] = round(time.perf_counter() - t0, 2)
+
+    topo = mesh_topology(obj.name)
+    remesh_reason = None
+    if voxel_mm is not None:
+        remesh_reason = "voxel_mm given"
+    elif not topo["manifold"]:
+        remesh_reason = "still not manifold after cleanup"
+    elif overlapping:
+        remesh_reason = "overlapping shells (booleans need one clean surface)"
+    if remesh_reason:
+        t = time.perf_counter()
+        if voxel_mm is None:
+            lengths = sorted(e.calc_length() for e in obj.data.edges)
+            median = lengths[len(lengths) // 2] * scale * _mm() if lengths else 0.3
+            voxel_mm = min(0.5, max(0.05, median * 0.7))
+        mod = obj.modifiers.new("BC_remesh", "REMESH")
+        mod.mode = "VOXEL"
+        mod.voxel_size = _bu(float(voxel_mm)) / scale
+        mod.use_smooth_shade = False
+        _apply_modifier(obj, mod)
+        steps.append(f"voxel remesh at {float(voxel_mm):.3f} mm ({remesh_reason})")
+        timings["remesh_s"] = round(time.perf_counter() - t, 2)
+    if target_faces is not None and len(obj.data.polygons) > int(target_faces):
+        t = time.perf_counter()
+        mod = obj.modifiers.new("BC_decimate", "DECIMATE")
+        mod.decimate_type = "COLLAPSE"
+        mod.ratio = int(target_faces) / len(obj.data.polygons)
+        mod.use_collapse_triangulate = True
+        _apply_modifier(obj, mod)
+        steps.append(f"decimated to {len(obj.data.polygons)} faces")
+        timings["decimate_s"] = round(time.perf_counter() - t, 2)
+
+    shells = []
+    if split_shells:
+        shells = _split_shells(obj)
+        if len(shells) > 1:
+            steps.append(f"split into {len(shells)} objects, one per shell")
+    after = _shell_report(obj)
+    after["dimensions_mm"] = _point_mm(obj.dimensions)
+    timings["total_s"] = round(time.perf_counter() - t0, 2)
+    result = {
+        "name": obj.name,
+        "before": before,
+        "after": after,
+        "steps": steps or ["nothing to fix"],
+        "overlapping_shells": overlapping,
+        "near_shells": near,
+        "timings": timings,
+    }
+    if shells:
+        result["shells"] = shells
+    if near:
+        result["note"] = (
+            f"Separate shells closer than {near_gap_mm} mm weld in the slicer: give "
+            "them a real clearance (fit_clearance or add_joint) or join them."
+        )
+    return result
+
+
+def _split_shells(obj) -> list[dict]:
+    """Split obj into one object per shell; the largest keeps the name."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    try:
+        comps = _component_volumes(bm)
+        if len(comps) <= 1:
+            return [{"name": obj.name, "volume_mm3": round(comps[0][0] * _mm() ** 3, 2) if comps else 0}]
+        out = []
+        for index, (volume, faces) in enumerate(comps):
+            keep = set(faces)
+            sub = bm.copy()
+            sub.faces.ensure_lookup_table()
+            bm.faces.index_update()
+            keep_idx = {f.index for f in keep}
+            dead = [f for f in sub.faces if f.index not in keep_idx]
+            bmesh.ops.delete(sub, geom=dead, context="FACES")
+            loose = [v for v in sub.verts if not v.link_faces]
+            if loose:
+                bmesh.ops.delete(sub, geom=loose, context="VERTS")
+            if index == 0:
+                target = obj
+                sub.to_mesh(obj.data)
+                obj.data.update()
+            else:
+                mesh = obj.data.copy()
+                sub.to_mesh(mesh)
+                target = _new_object_like(obj, f"{obj.name}.shell_{index:02d}", mesh)
+            sub.free()
+            out.append(
+                {
+                    "name": target.name,
+                    "volume_mm3": round(volume * _mm() ** 3, 2),
+                    "dimensions_mm": _point_mm(target.dimensions),
+                }
+            )
+        bpy.context.view_layer.update()
+        return out
+    finally:
+        bm.free()
+
+
+# ---------------------------------------------------------------- analyze_figure
+
+
+def _occupancy(tree: BVHTree, lo: Vector, hi: Vector, cell: float):
+    """Inside/outside grid from vertical rays (parity). occ[i][j] is a sorted
+    list of (z_in, z_out) intervals for column (i, j)."""
+    nx = max(1, int(math.ceil((hi.x - lo.x) / cell)))
+    ny = max(1, int(math.ceil((hi.y - lo.y) / cell)))
+    up = Vector((0.0, 0.0, 1.0))
+    columns = []
+    for i in range(nx):
+        row = []
+        for j in range(ny):
+            origin = Vector((lo.x + (i + 0.5) * cell, lo.y + (j + 0.5) * cell, lo.z - 1.0))
+            hits = _ray_hits(tree, origin, up)
+            intervals = [
+                (origin.z + hits[k], origin.z + hits[k + 1]) for k in range(0, len(hits) - 1, 2)
+            ]
+            row.append(intervals)
+        columns.append(row)
+    return columns, nx, ny
+
+
+def _slice_mask(columns, nx, ny, z0: float, z1: float) -> set:
+    """Cells occupied anywhere between z0 and z1."""
+    mask = set()
+    for i in range(nx):
+        for j in range(ny):
+            for a, b in columns[i][j]:
+                if a < z1 and b > z0:
+                    mask.add((i, j))
+                    break
+    return mask
+
+
+def _label(mask: set) -> list[set]:
+    out, seen = [], set()
+    for cell in mask:
+        if cell in seen:
+            continue
+        seen.add(cell)
+        stack, comp = [cell], set()
+        while stack:
+            c = stack.pop()
+            comp.add(c)
+            i, j = c
+            for n in ((i + 1, j), (i - 1, j), (i, j + 1), (i, j - 1)):
+                if n in mask and n not in seen:
+                    seen.add(n)
+                    stack.append(n)
+        out.append(comp)
+    out.sort(key=len, reverse=True)
+    return out
+
+
+def analyze_figure(name: str, others: list[str] | None = None, cell_mm: float | None = None) -> dict:
+    """Heuristic layout of a standing figure (Z up, floor at its lowest Z)."""
+    t0 = time.perf_counter()
+    objs = [_get_object(name)] + [_get_object(n) for n in (others or [])]
+    for o in objs:
+        if o.type != "MESH":
+            raise ValueError(f"Object is not a mesh: {o.name}")
+    bms = [_world_bm(o) for o in objs]
+    try:
+        trees = [BVHTree.FromBMesh(b) for b in bms]
+        all_co = [v.co for b in bms for v in b.verts]
+        lo = Vector([min(c[i] for c in all_co) for i in range(3)])
+        hi = Vector([max(c[i] for c in all_co) for i in range(3)])
+        dims = hi - lo
+        height = dims.z
+        length_axis = 0 if dims.x >= dims.y else 1
+        width_axis = 1 - length_axis
+        cell = _bu(cell_mm) if cell_mm else max(dims.x, dims.y) / 90.0
+        merged = bmesh.new()
+        for b in bms:
+            tmp = bpy.data.meshes.new("BC_tmp_analyze")
+            b.to_mesh(tmp)
+            merged.from_mesh(tmp)
+            bpy.data.meshes.remove(tmp)
+        tree_all = BVHTree.FromBMesh(merged)
+        columns, nx, ny = _occupancy(tree_all, lo, hi, cell)
+        merged.free()
+
+        def cell_center(c):
+            return Vector((lo.x + (c[0] + 0.5) * cell, lo.y + (c[1] + 0.5) * cell))
+
+        def owner(point3):
+            best = None
+            for o, tree in zip(objs, trees):
+                hit = tree.find_nearest(point3)
+                if hit[0] is not None and (best is None or hit[3] < best[1]):
+                    best = (o.name, hit[3])
+            return best[0] if best else name
+
+        # Top profile along the length axis -> head end.
+        nl = nx if length_axis == 0 else ny
+        top = [lo.z] * nl
+        for i in range(nx):
+            for j in range(ny):
+                if columns[i][j]:
+                    k = i if length_axis == 0 else j
+                    top[k] = max(top[k], columns[i][j][-1][1])
+        k_top = max(range(nl), key=lambda k: top[k])
+        center_l = (nl - 1) / 2
+        head_sign = 1 if k_top > center_l else -1
+        length_name = "XY"[length_axis]
+        width_name = "XY"[width_axis]
+
+        # Feet: islands in a thin slab above the floor.
+        foot_h = max(2.5 * cell, 0.05 * height)
+        feet_mask = _slice_mask(columns, nx, ny, lo.z, lo.z + foot_h)
+        footprint = len(_slice_mask(columns, nx, ny, lo.z, hi.z))
+        islands = [c for c in _label(feet_mask) if len(c) >= max(3, 0.005 * footprint)]
+
+        # Leg columns: follow each island upward until it merges.
+        nz = int(math.ceil(height / cell))
+        levels = []
+        for k in range(nz):
+            z0 = lo.z + k * cell
+            levels.append(_label(_slice_mask(columns, nx, ny, z0, z0 + cell)))
+        legs = []
+        for index, island in enumerate(islands):
+            prev = island
+            min_area = len(island)
+            merge_z = hi.z
+            widths = None
+            for k in range(nz):
+                comp = next((c for c in levels[k] if c & prev), None)
+                if comp is None:
+                    break
+                others_hit = any(comp & other for o, other in enumerate(islands) if o != index)
+                if k > 0 and (others_hit or len(comp) > 2.2 * max(min_area, 1)):
+                    merge_z = lo.z + k * cell
+                    break
+                min_area = min(min_area, len(comp))
+                prev = comp
+                widths = comp
+            if widths is None:
+                widths = island
+            ci = [c[0] for c in widths]
+            cj = [c[1] for c in widths]
+            cx = lo.x + (sum(ci) / len(ci) + 0.5) * cell
+            cy = lo.y + (sum(cj) / len(cj) + 0.5) * cell
+            ext_x = (max(ci) - min(ci) + 1) * cell
+            ext_y = (max(cj) - min(cj) + 1) * cell
+            fi = [c[0] for c in island]
+            fj = [c[1] for c in island]
+            foot_x = (max(fi) - min(fi) + 1) * cell
+            foot_y = (max(fj) - min(fj) + 1) * cell
+            center = Vector((cx, cy, lo.z + 0.5 * (merge_z - lo.z)))
+            l_val = center[length_axis]
+            w_val = center[width_axis]
+            mid_l = (lo[length_axis] + hi[length_axis]) / 2
+            mid_w = (lo[width_axis] + hi[width_axis]) / 2
+            front = (l_val - mid_l) * head_sign > 0
+            side = "left" if (w_val - mid_w) < 0 else "right"
+            legs.append(
+                {
+                    "body_run": _body_run(columns, lo, cell, nx, ny, cx, cy, width_axis),
+                    "name": f"leg_{'front' if front else 'rear'}_{side}",
+                    "owner": owner(Vector((cx, cy, lo.z + 0.5 * foot_h))),
+                    "center": Vector((cx, cy)),
+                    "merge_z": merge_z,
+                    "column_ext": (ext_x, ext_y),
+                    "foot_ext": (foot_x, foot_y),
+                    "column_top": _column_top(columns, lo, cell, cx, cy, merge_z),
+                }
+            )
+        # Body sections along the length axis above the leg tops.
+        belly = min((leg["merge_z"] for leg in legs), default=lo.z)
+        areas = []
+        for k in range(nl):
+            count = 0
+            for i in range(nx):
+                for j in range(ny):
+                    if (i if length_axis == 0 else j) != k:
+                        continue
+                    for a, b in columns[i][j]:
+                        count += max(0.0, b - max(a, belly))
+            areas.append(count * cell)  # BU²
+        timings = round(time.perf_counter() - t0, 2)
+        return _figure_report(
+            name, objs, lo, hi, cell, legs, areas, top, k_top, head_sign,
+            length_axis, width_axis, belly, timings,
+        )
+    finally:
+        for b in bms:
+            b.free()
+
+
+def _body_run(columns, lo, cell, nx, ny, x, y, axis):
+    """f(z) -> (lo, hi) of the occupied run through (x, y) along the width
+    axis at height z."""
+
+    def occupied(i, j, z):
+        return any(a <= z <= b for a, b in columns[i][j])
+
+    def run(z):
+        i = max(0, min(int((x - lo.x) / cell), nx - 1))
+        j = max(0, min(int((y - lo.y) / cell), ny - 1))
+        if not occupied(i, j, z):
+            return ((x, y)[axis], (x, y)[axis])
+        step = (1, 0) if axis == 0 else (0, 1)
+        a = b = (i, j)
+        while 0 <= a[0] - step[0] and 0 <= a[1] - step[1] and occupied(a[0] - step[0], a[1] - step[1], z):
+            a = (a[0] - step[0], a[1] - step[1])
+        while b[0] + step[0] < nx and b[1] + step[1] < ny and occupied(b[0] + step[0], b[1] + step[1], z):
+            b = (b[0] + step[0], b[1] + step[1])
+        origin = lo.x if axis == 0 else lo.y
+        return (origin + a[axis] * cell, origin + (b[axis] + 1) * cell)
+
+    return run
+
+
+def _column_top(columns, lo, cell, x, y, z_from) -> float:
+    i = int((x - lo.x) / cell)
+    j = int((y - lo.y) / cell)
+    i = max(0, min(i, len(columns) - 1))
+    j = max(0, min(j, len(columns[0]) - 1))
+    top = z_from
+    for a, b in columns[i][j]:
+        if b > z_from and a <= top + cell:
+            top = max(top, b)
+    return top
+
+
+def _figure_report(name, objs, lo, hi, cell, legs, areas, top, k_top, head_sign,
+                   length_axis, width_axis, belly, timings) -> dict:
+    L = "XY"[length_axis]
+    W = "XY"[width_axis]
+    axis_l = Vector((1, 0, 0)) if length_axis == 0 else Vector((0, 1, 0))
+    axis_w = Vector((0, 1, 0)) if length_axis == 0 else Vector((1, 0, 0))
+    head_dir = axis_l * head_sign
+    nl = len(areas)
+
+    def l_coord(k):
+        return lo[length_axis] + (k + 0.5) * cell
+
+    clearance = _bu(0.30)
+    suggestions = []
+    leg_out = []
+    for leg in legs:
+        cx, cy = leg["center"]
+        ext_l = leg["column_ext"][length_axis]
+        ext_w = leg["column_ext"][width_axis]
+        foot_l = leg["foot_ext"][length_axis]
+        foot_w = leg["foot_ext"][width_axis]
+        z_cut = leg["merge_z"] - 0.5 * cell
+        space = leg["column_top"] - z_cut
+        box_size = [0.0, 0.0, 0.0]
+        box_size[length_axis] = max(ext_l, foot_l) + _bu(2.0)
+        box_size[width_axis] = max(ext_w, foot_w) + _bu(2.0)
+        box_size[2] = z_cut - (lo.z - _bu(1.0))
+        box_center = Vector((cx, cy, (z_cut + lo.z - _bu(1.0)) / 2))
+        # Pin hinge: a tab of the leg goes up into the body; the pin crosses
+        # it along the width axis and anchors in body walls on both sides.
+        pin_d = min(_bu(4.0), max(_bu(2.0), 0.3 * ext_l))
+        tab_l = min(ext_l, max(0.6 * ext_l, pin_d + 2 * clearance + _bu(1.8)))
+        tab_h = min(space - _bu(_MIN_WALL_MM + 1.3), max(pin_d + 2 * clearance + _bu(2.4), 0.6 * ext_l))
+        z_pin = z_cut + tab_h / 2
+        w_center = (cx, cy)[width_axis]
+        body_lo, body_hi = leg["body_run"](z_pin)
+        inset = _bu(1.0) + clearance
+        side_wall = _bu(2.0) + clearance
+        tab_lo = max(w_center - ext_w / 2 + inset, body_lo + side_wall)
+        tab_hi = min(w_center + ext_w / 2 - inset, body_hi - side_wall)
+        tab_w = tab_hi - tab_lo
+        confidence = 0.8 if leg["merge_z"] < hi.z - cell else 0.3
+        entry = {
+            "name": leg["name"],
+            "part": leg["owner"],
+            "existing_part": leg["owner"] != name,
+            "foot_center_mm": [_to_mm(cx), _to_mm(cy)],
+            "leg_top_z_mm": _to_mm(leg["merge_z"]),
+            "column_size_mm": {L: _to_mm(ext_l), W: _to_mm(ext_w)},
+            "body_above_mm": _to_mm(space),
+            "confidence": confidence,
+        }
+        if leg["owner"] == name:
+            tab_center = Vector((cx, cy, z_cut + tab_h / 2 - _bu(0.25)))
+            tab_center[width_axis] = (tab_lo + tab_hi) / 2
+            tab_size = [0.0, 0.0, 0.0]
+            tab_size[length_axis] = tab_l
+            tab_size[width_axis] = max(tab_w, _bu(0.1))
+            tab_size[2] = tab_h + _bu(0.5)
+            pivot_pin = tab_center.copy()
+            pivot_pin.z = z_pin
+            r0 = min(_bu(4.0), max(_bu(1.5), 0.25 * min(ext_l, ext_w)))
+            pivot_ball = Vector((cx, cy, z_cut + clearance + r0 + clearance + _bu(_MIN_WALL_MM) + clearance + _bu(0.2)))
+            entry["pin"] = {
+                "cutter": {
+                    "type": "union",
+                    "parts": [
+                        {"type": "box", "center": _point_mm(box_center), "size": [_to_mm(s) for s in box_size]},
+                        {"type": "box", "center": _point_mm(tab_center), "size": [_to_mm(s) for s in tab_size]},
+                    ],
+                },
+                "pivot": _point_mm(pivot_pin),
+                "axis": list(axis_w),
+                "size_mm": _to_mm(pin_d, 2),
+                "fits": tab_w >= _bu(1.5) and tab_h > pin_d + 2 * clearance + _bu(2.0),
+            }
+            entry["ball"] = {
+                "cutter": {"type": "box", "center": _point_mm(box_center), "size": [_to_mm(s) for s in box_size]},
+                "pivot": _point_mm(pivot_ball),
+                "axis": list(axis_w),
+                "size_mm": _to_mm(2 * r0, 2),
+                "fits": space > (pivot_ball.z - z_cut) + r0 + _bu(_MIN_WALL_MM + 0.3),
+            }
+        leg_out.append(entry)
+
+    # Neck: narrowest body section between the middle and the head top.
+    center_k = (nl - 1) / 2
+    lo_k, hi_k = sorted((int(round(center_k)), k_top))
+    neck = None
+    if hi_k - lo_k >= 2:
+        span = [k for k in range(lo_k, hi_k + 1) if areas[k] > 0]
+        if span:
+            k_neck = min(span, key=lambda k: areas[k])
+            ref = max(areas)
+            ratio = areas[k_neck] / ref if ref else 1.0
+            point = [0.0, 0.0, 0.0]
+            point[length_axis] = l_coord(k_neck)
+            point[width_axis] = (lo[width_axis] + hi[width_axis]) / 2
+            point[2] = (belly + top[k_neck]) / 2
+            neck = {
+                "cut": {"type": "plane", "point": _point_mm(Vector(point)), "normal": list(head_dir)},
+                "section_ratio": round(ratio, 3),
+                "confidence": round(max(0.1, min(0.9, 1.2 - ratio)), 2),
+                "note": "plane cut: if it also crosses legs or ears, use a box cutter around the head",
+            }
+    # Tail: thin sections at the rear end.
+    tail = None
+    rear = range(nl) if head_sign > 0 else range(nl - 1, -1, -1)
+    ref = max(areas) if areas else 0
+    run = []
+    for k in rear:
+        if areas[k] <= 0:
+            if run:
+                break
+            continue
+        if areas[k] < 0.12 * ref:
+            run.append(k)
+        else:
+            break
+    if run:
+        k_end = run[-1]
+        point = [0.0, 0.0, 0.0]
+        point[length_axis] = l_coord(k_end) + head_sign * 0.5 * cell
+        point[width_axis] = (lo[width_axis] + hi[width_axis]) / 2
+        point[2] = (belly + top[k_end]) / 2
+        tail = {
+            "cut": {"type": "plane", "point": _point_mm(Vector(point)), "normal": list(-head_dir)},
+            "length_mm": _to_mm(len(run) * cell),
+            "confidence": 0.5 if len(run) >= 2 else 0.3,
+        }
+    # Middle of the body between front and rear legs.
+    front = [l for l in legs if (l["center"][length_axis] - (lo[length_axis] + hi[length_axis]) / 2) * head_sign > 0]
+    rear_legs = [l for l in legs if l not in front]
+    mid = None
+    if front and rear_legs:
+        f = max((l["center"][length_axis] * -head_sign for l in front)) * -head_sign
+        r = max((l["center"][length_axis] * head_sign for l in rear_legs)) * head_sign
+        point = [0.0, 0.0, 0.0]
+        point[length_axis] = (f + r) / 2
+        point[width_axis] = (lo[width_axis] + hi[width_axis]) / 2
+        point[2] = belly + 0.5 * (max(top) - belly) * 0.6
+        mid = {"cut": {"type": "plane", "point": _point_mm(Vector(point)), "normal": list(-head_dir)}}
+    # Left/right mirror check of the leg columns.
+    mirrors = []
+    by_name = {l["name"]: l for l in leg_out}
+    for end in ("front", "rear"):
+        a, b = by_name.get(f"leg_{end}_left"), by_name.get(f"leg_{end}_right")
+        if a and b:
+            diff = max(abs(a["column_size_mm"][k] - b["column_size_mm"][k]) for k in (L, W))
+            mirrors.append({"pair": end, "size_difference_mm": round(diff, 2), "ok": diff <= 1.0})
+    return {
+        "name": name,
+        "objects": [o.name for o in objs],
+        "dimensions_mm": _point_mm(hi - lo),
+        "floor_z_mm": _to_mm(lo.z),
+        "length_axis": L,
+        "width_axis": W,
+        "head_direction": list(head_dir),
+        "belly_z_mm": _to_mm(belly),
+        "grid_cell_mm": _to_mm(cell),
+        "legs": leg_out,
+        "neck": neck,
+        "tail": tail,
+        "mid_body": mid,
+        "mirror_check": mirrors,
+        "timings_s": timings,
+        "note": (
+            "Heuristic: confirm every cut with screenshots before cutting. "
+            "Pivots and cutters are in mm, world space."
+        ),
+    }
+
+
+# ---------------------------------------------------------------- cut_part
+
+
+def cut_part(name: str, cutter: dict, new_part_name: str, gap_mm: float = 0.3,
+             allow_multiple_shells: bool = False) -> dict:
+    obj = _part(name)
+    new_part_name = str(new_part_name).strip()
+    if not new_part_name:
+        raise ValueError("new_part_name must not be empty")
+    if new_part_name in bpy.data.objects:
+        raise ValueError(f"An object named {new_part_name!r} already exists")
+    gap_mm = _number(gap_mm, "gap_mm", 0.0)
+    if gap_mm > 5.0:
+        raise ValueError("gap_mm must be at most 5 mm")
+    spec = _parse_cutter(cutter)
+    reach, around = _reach(obj)
+    gap = _bu(gap_mm)
+    snap = _Snapshot([obj])
+    t0 = time.perf_counter()
+    try:
+        child = _new_object_like(obj, new_part_name, obj.data.copy())
+        snap.created.append(child)
+        prims = _cutter_prims(spec)
+        inner = [_prim_bm(p, 0.0, reach, around) for p in prims]
+        outer = [_prim_bm(p, gap, reach, around) for p in prims]
+        try:
+            if len(inner) > 1:
+                # Intersect with the union of the primitives: union them first.
+                union = _bm_boolean(inner[0], "UNION", inner[1:])
+                t_child = _boolean(child, "INTERSECT", [union])
+                union.free()
+            else:
+                t_child = _boolean(child, "INTERSECT", inner)
+            t_parent = _boolean(obj, "DIFFERENCE", outer)
+        finally:
+            for b in inner + outer:
+                b.free()
+        if not child.data.polygons:
+            raise ValueError("The cutter does not touch the part: the new part would be empty")
+        if not obj.data.polygons:
+            raise ValueError("The cutter swallows the whole part: nothing would remain")
+        dropped = {"child": _drop_slivers(child), "parent": _drop_slivers(obj)}
+        report = {"parent": _shell_report(obj), "child": _shell_report(child)}
+        problems = [
+            f"{label} has {r['components']} shells" for label, r in report.items() if r["components"] != 1
+        ] + [f"{label} is not watertight" for label, r in report.items() if not r["manifold"]]
+        if problems and not allow_multiple_shells:
+            raise ValueError(
+                "Cut rejected (rolled back): "
+                + "; ".join(problems)
+                + ". Each part must be one watertight shell: use a box/cylinder/"
+                "sphere cutter that encloses only the piece you want, or pass "
+                "allow_multiple_shells."
+            )
+        child["bc_cutter"] = json.dumps(_cutter_to_mm(spec))
+        child["bc_cut_gap_mm"] = gap_mm
+        child["bc_cut_from"] = obj.name
+    except BaseException:
+        snap.restore()
+        raise
+    snap.discard()
+    return {
+        "parent": obj.name,
+        "child": child.name,
+        "gap_mm": gap_mm,
+        "parts": {obj.name: report["parent"], child.name: report["child"]},
+        "dropped_slivers_mm3": dropped,
+        "timings_s": {
+            "child_boolean": round(t_child, 2),
+            "parent_boolean": round(t_parent, 2),
+            "total": round(time.perf_counter() - t0, 2),
+        },
+    }
+
+
+# ---------------------------------------------------------------- add_joint
+
+
+def _make_pivot(child, parent, point: Vector, axis: Vector) -> str:
+    """Pivot empty at point whose local Z (or matching world axis) is axis."""
+    names = {(1, 0, 0): "X", (0, 1, 0): "Y", (0, 0, 1): "Z"}
+    key = tuple(int(round(abs(c))) for c in axis) if max(abs(c) for c in axis) > 1 - 1e-6 else None
+    pivot = bpy.data.objects.new(f"BC_Pivo_{child.name}", None)
+    pivot.empty_display_type = "ARROWS"
+    pivot.empty_display_size = max(max(child.dimensions) * 0.15, 1.0)
+    pivot.rotation_mode = "XYZ"
+    if key in names:
+        axis_name = names[key]
+        rotation = Matrix.Identity(3)
+    else:
+        axis_name = "Z"
+        rotation = Vector((0, 0, 1)).rotation_difference(axis).to_matrix()
+    for collection in child.users_collection or [bpy.context.scene.collection]:
+        collection.objects.link(pivot)
+    bpy.context.view_layer.update()
+    world = child.matrix_world.copy()
+    pivot.parent = parent
+    pivot.matrix_world = Matrix.Translation(point) @ rotation.to_4x4()
+    bpy.context.view_layer.update()
+    pivot["bc_axis"] = axis_name
+    pivot["bc_rest"] = list(pivot.rotation_euler)
+    pivot["bc_angle"] = 0.0
+    child.parent = pivot
+    child.matrix_parent_inverse = pivot.matrix_world.inverted()
+    child.matrix_world = world
+    bpy.context.view_layer.update()
+    return pivot.name
+
+
+def _relief_bm(child, parent, pivot, axis, clearance, range_deg, keep):
+    """Swept clearance around the child near the joint, as one bmesh: the
+    child's contact region (or its cutter), grown by the clearance, rotated
+    over +-range about the axis. keep (bmesh or None) is spared."""
+    child_bm = _world_bm(child)
+    try:
+        parent_tree = _world_tree(parent)
+        near = _bu(2.0) + clearance
+        contact = []
+        step = max(1, len(child_bm.verts) // 60000)
+        for v in child_bm.verts[::step]:
+            hit = parent_tree.find_nearest(v.co, near)
+            if hit[0] is not None:
+                contact.append(v.co.copy())
+        if not contact:
+            return None, 0.0
+        rho0 = max((p - pivot).length for p in contact)
+        # Points this deep can rise into the parent while turning.
+        depth = near + rho0 * math.sin(math.radians(min(range_deg, 90.0)))
+        rho = rho0
+        for v in child_bm.verts[::step]:
+            hit = parent_tree.find_nearest(v.co, depth)
+            if hit[0] is not None:
+                rho = max(rho, (v.co - pivot).length)
+        rho += clearance
+    finally:
+        child_bm.free()
+    ball = _sphere_bm(pivot, rho)
+    pieces = []
+    try:
+        recorded = child.get("bc_cutter")
+        if recorded:
+            spec = _parse_cutter(json.loads(recorded))
+            reach, around = _reach(child)
+            for prim in _cutter_prims(spec):
+                grown = _prim_bm(prim, clearance + _bu(0.01), reach, around)
+                pieces.append(_bm_boolean(grown, "INTERSECT", [ball]))
+                grown.free()
+            offsets = [Vector()]
+        else:
+            whole = _world_bm(child)
+            pieces.append(_bm_boolean(whole, "INTERSECT", [ball]))
+            whole.free()
+            offsets = _ball_offsets(clearance + _bu(0.01))
+        swept_parts = []
+        for piece in pieces:
+            if len(piece.verts) < 4:
+                continue
+            base = _hull_points([v.co for v in piece.verts])
+            grown = [p + o for p in base for o in offsets]
+            swept_parts.append(_swept_hull(grown, pivot, axis, range_deg))
+        if not swept_parts:
+            return None, rho
+        relief = swept_parts[0]
+        if len(swept_parts) > 1:
+            relief = _bm_boolean(swept_parts[0], "UNION", swept_parts[1:])
+            for b in swept_parts:
+                b.free()
+        if keep is not None:
+            spared = _bm_boolean(relief, "DIFFERENCE", [keep])
+            relief.free()
+            relief = spared
+        return relief, rho
+    finally:
+        ball.free()
+        for piece in pieces:
+            piece.free()
+
+
+def _walls_from(tree: BVHTree, point: Vector, first_max: float, dirs=None) -> float | None:
+    """Thinnest wall around a cavity centred at point: per ray, distance
+    between the first and second surface crossing (rays whose first hit is
+    beyond first_max go out through a slot and are skipped)."""
+    best = None
+    for d in dirs or _sphere_dirs(160):
+        hits = _ray_hits(tree, point, d)
+        if len(hits) < 2 or hits[0] > first_max:
+            continue
+        wall = hits[1] - hits[0]
+        best = wall if best is None else min(best, wall)
+    return best
+
+
+def _pull_test(parent, child, directions: dict) -> dict:
+    """How far the child slides along each direction before touching the
+    parent (mm, None = more than 3 mm: not retained that way)."""
+    parent_tree = _world_tree(parent)
+    child_bm = _world_bm(child)
+    out = {}
+    try:
+        for label, d in directions.items():
+            out[label] = None
+            for dist_mm in (0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0):
+                moved = child_bm.copy()
+                moved.transform(Matrix.Translation(d * _bu(dist_mm)))
+                tree = BVHTree.FromBMesh(moved)
+                moved.free()
+                if tree.overlap(parent_tree):
+                    out[label] = dist_mm
+                    break
+    finally:
+        child_bm.free()
+    return out
+
+
+def _gap_check(parent, child, pivot: Vector, radius: float) -> dict:
+    a, b = _world_bm(parent), _world_bm(child)
+    try:
+        gap, approximate = _min_gap(a, b)
+        local = None
+        # Exact (with edges) near the joint, where the clearances are.
+        crop_a = _crop(a, pivot, radius)
+        crop_b = _crop(b, pivot, radius)
+        if crop_a and crop_b:
+            local, _ = _min_gap(crop_a, crop_b)
+        for c in (crop_a, crop_b):
+            if c:
+                c.free()
+    finally:
+        a.free()
+        b.free()
+    return {
+        "min_gap_mm": None if gap is None else _to_mm(gap, 4),
+        "local_min_gap_mm": None if local is None else _to_mm(local, 4),
+        "approximate": approximate,
+    }
+
+
+def _crop(bm, center: Vector, radius: float):
+    faces = [f for f in bm.faces if any((v.co - center).length <= radius for v in f.verts)]
+    if not faces:
+        return None
+    out = bmesh.new()
+    vmap = {}
+    for f in faces:
+        vs = []
+        for v in f.verts:
+            if v not in vmap:
+                vmap[v] = out.verts.new(v.co)
+            vs.append(vmap[v])
+        try:
+            out.faces.new(vs)
+        except ValueError:
+            pass
+    out.normal_update()
+    return out
+
+
+def add_joint(
+    parent: str,
+    child: str,
+    joint_type: str,
+    pivot,
+    axis,
+    size_mm: float | None = None,
+    clearance_mm: float = 0.30,
+    range_deg: float | None = None,
+    relief: bool | None = None,
+    test: bool = True,
+) -> dict:
+    joint_type = str(joint_type).lower()
+    if joint_type not in _JOINT_TYPES:
+        raise ValueError(f"type must be one of {', '.join(_JOINT_TYPES)}")
+    parent_obj, child_obj = _part(parent), _part(child)
+    if parent_obj == child_obj:
+        raise ValueError("parent and child must be different objects")
+    if child_obj.parent is not None and "bc_axis" in child_obj.parent:
+        raise ValueError(f"{child_obj.name} already has the joint {child_obj.parent.name}")
+    p = _vec_mm(pivot, "pivot")
+    a = _direction(axis, "axis")
+    c_mm = _number(clearance_mm, "clearance_mm", 0.05)
+    if c_mm > 1.0:
+        raise ValueError("clearance_mm must be at most 1 mm (0.30 print-in-place, 0.20 assembled)")
+    c = _bu(c_mm)
+    rng = _DEFAULT_RANGE[joint_type] if range_deg is None else _number(range_deg, "range_deg", 0.0)
+    if rng > 170:
+        raise ValueError("range_deg must be at most 170")
+    if size_mm is not None:
+        size_mm = _number(size_mm, "size_mm", 0.0, allow_zero=False)
+    use_relief = (joint_type != "cap") if relief is None else bool(relief)
+    wall = _bu(_MIN_WALL_MM)
+    t0 = time.perf_counter()
+    timings: dict = {}
+    built: dict = {}
+    warnings: list[str] = []
+    snap = _Snapshot([parent_obj, child_obj])
+    try:
+        child_tree = _world_tree(child_obj)
+        p_in_child = _inside(child_tree, p)
+        near = child_tree.find_nearest(p)
+        d_child = near[3]
+        if d_child is None:
+            raise ValueError(f"{child_obj.name} has no surface")
+        u = Vector(near[0]) - p
+        u = u.normalized() if u.length > 1e-9 else Vector((0, 0, -1))
+        if p_in_child:
+            centroid = sum((child_obj.matrix_world @ Vector(c_) for c_ in child_obj.bound_box), Vector()) / 8
+            u = (centroid - p)
+            u = (u - a * u.dot(a))
+            u = u.normalized() if u.length > 1e-9 else a.orthogonal().normalized()
+
+        if joint_type == "pin":
+            if not p_in_child:
+                raise ValueError(
+                    "pin: the pivot must be inside the child (the pin crosses a "
+                    "hole in the child and anchors in the parent on both sides "
+                    "of it). Move the pivot into the child's knuckle/tab."
+                )
+            t_perp = min(
+                (h[0] for h in (_ray_hits(child_tree, p, d) for d in _perpendicular_dirs(a)) if h),
+                default=0.0,
+            )
+            if size_mm is None:
+                dp = min(_bu(5.0), max(_bu(1.6), 1.5 * (t_perp - c - wall)))
+            else:
+                dp = _bu(size_mm)
+            if t_perp < dp / 2 + c + _bu(0.8):
+                raise ValueError(
+                    f"pin: the child is only {_to_mm(t_perp)} mm thick around the pivot "
+                    f"(needs {_to_mm(dp / 2 + c + _bu(0.8))} mm for a {_to_mm(dp)} mm pin "
+                    "with its hole); use a smaller size_mm or move the pivot"
+                )
+            if use_relief:
+                t = time.perf_counter()
+                # The walls that anchor the pin are spared by the relief.
+                span = _bu(1000.0)
+                keep = _cylinder_bm(p - a * span, p + a * span, dp / 2 + c + wall)
+                relief_bm, rho = _relief_bm(child_obj, parent_obj, p, a, c, rng, keep)
+                keep.free()
+                if relief_bm is not None:
+                    _boolean(parent_obj, "DIFFERENCE", [relief_bm])
+                    relief_bm.free()
+                    built["relief_radius_mm"] = _to_mm(rho)
+                timings["relief_s"] = round(time.perf_counter() - t, 2)
+            parent_tree = _world_tree(parent_obj)
+            sides = {}
+            for sign in (1, -1):
+                d = a * sign
+                exit_child = _ray_hits(child_tree, p, d)
+                t_out = exit_child[0] if exit_child else _bu(1.0)
+                hits = _ray_hits(parent_tree, p, d)
+                wall_len = (hits[1] - hits[0]) if len(hits) >= 2 else 0.0
+                if hits and wall_len >= _bu(1.6):
+                    embed = min(_bu(2.0), wall_len - _bu(0.8))
+                    sides[sign] = {
+                        "hole_end": t_out + _bu(1.0),
+                        "pin_end": hits[0] + embed,
+                        "anchored": True,
+                        "embed_mm": _to_mm(embed),
+                        "parent_wall_mm": _to_mm(wall_len),
+                    }
+                else:
+                    blind = max(dp / 2, t_out - _bu(0.8))
+                    sides[sign] = {
+                        "hole_end": blind,
+                        "pin_end": blind - c,
+                        "anchored": False,
+                        "parent_wall_mm": _to_mm(wall_len),
+                    }
+            if not any(s["anchored"] for s in sides.values()):
+                raise ValueError(
+                    "pin: no parent wall of 1.6 mm or more on either side of the "
+                    "child along the axis; the pin cannot anchor. Use a ball "
+                    "joint, or cut the child with a tab that sits inside the parent."
+                )
+            if not all(s["anchored"] for s in sides.values()):
+                warnings.append(
+                    "pin anchored on one side only: the child can slide off along "
+                    "the axis on the other side unless something else holds it"
+                )
+            t = time.perf_counter()
+            pin = _cylinder_bm(p - a * sides[-1]["pin_end"], p + a * sides[1]["pin_end"], dp / 2)
+            hole = _cylinder_bm(p - a * sides[-1]["hole_end"], p + a * sides[1]["hole_end"], dp / 2 + c, outer=True)
+            try:
+                _boolean(child_obj, "DIFFERENCE", [hole])
+                _boolean(parent_obj, "UNION", [pin])
+            finally:
+                pin.free()
+                hole.free()
+            timings["pin_s"] = round(time.perf_counter() - t, 2)
+            built.update(
+                {
+                    "pin_diameter_mm": _to_mm(dp),
+                    "hole_diameter_mm": _to_mm(dp + 2 * c),
+                    "sides": {("+axis" if k > 0 else "-axis"): {kk: vv for kk, vv in v.items() if kk.endswith("_mm") or kk == "anchored"} for k, v in sides.items()},
+                }
+            )
+            check_radius = max(sides[1]["hole_end"], sides[-1]["hole_end"]) + _bu(3.0)
+            child_wall = _walls_from(_world_tree(child_obj), p, dp / 2 + c + _bu(0.3), _perpendicular_dirs(a, 32))
+            built["child_wall_around_hole_mm"] = None if child_wall is None else _to_mm(child_wall)
+
+        elif joint_type == "ball":
+            if p_in_child:
+                raise ValueError(
+                    "ball: the pivot must be inside the parent, beyond the child "
+                    "(the ball sits in a socket in the parent and a neck joins it "
+                    "to the child)"
+                )
+            max_r0 = d_child - 3 * c - wall
+            r0 = _bu(size_mm) / 2 if size_mm is not None else min(_bu(6.0), max_r0)
+            if r0 < _bu(1.5) or r0 > max_r0 + 1e-9:
+                need = _to_mm(max(r0, _bu(1.5)) + 3 * c + wall)
+                raise ValueError(
+                    f"ball: the pivot is {_to_mm(d_child)} mm from the child; a ball of "
+                    f"{_to_mm(2 * max(r0, _bu(1.5)))} mm needs {need} mm (socket + "
+                    f"{_MIN_WALL_MM} mm lip + clearances). Move the pivot deeper into the parent."
+                )
+            r1 = r0 + c
+            rn = max(_bu(0.6), 0.55 * r0)
+            neck_end = p + u * (d_child + _bu(1.5))
+            ball = _sphere_bm(p, r0)
+            neck = _cylinder_bm(p, neck_end, rn)
+            socket = _sphere_bm(p, r1, outer=True)
+            slot_cyl = _cylinder_bm(p, p + u * (d_child + c), rn + c, outer=True)
+            slot = _swept_hull([v.co for v in slot_cyl.verts], p, a, rng)
+            slot_cyl.free()
+            cutters = [socket, slot]
+            keep = _sphere_bm(p, d_child - c)
+            t = time.perf_counter()
+            try:
+                if use_relief:
+                    relief_bm, rho = _relief_bm(child_obj, parent_obj, p, a, c, rng, keep)
+                    if relief_bm is not None:
+                        cutters.append(relief_bm)
+                        built["relief_radius_mm"] = _to_mm(rho)
+                _boolean(parent_obj, "DIFFERENCE", cutters)
+                _boolean(child_obj, "UNION", [ball, neck])
+            finally:
+                for b in cutters + [ball, neck, keep]:
+                    b.free()
+            timings["ball_s"] = round(time.perf_counter() - t, 2)
+            built.update(
+                {
+                    "ball_diameter_mm": _to_mm(2 * r0),
+                    "socket_diameter_mm": _to_mm(2 * r1),
+                    "neck_diameter_mm": _to_mm(2 * rn),
+                    "lip_mm": _to_mm(d_child - c - r1),
+                }
+            )
+            check_radius = d_child + _bu(3.0)
+            socket_wall = _walls_from(_world_tree(parent_obj), p, r1 + _bu(0.3))
+            built["parent_wall_around_socket_mm"] = None if socket_wall is None else _to_mm(socket_wall)
+
+        else:  # cap
+            parent_tree = _world_tree(parent_obj)
+            if p_in_child:
+                raise ValueError("cap: the pivot must be in the parent (the cap grows from it into the child)")
+            if size_mm is not None:
+                radius = _bu(size_mm) / 2
+            else:
+                inner = min(
+                    (h[0] for h in (_ray_hits(parent_tree, p, d) for d in _perpendicular_dirs(u)) if h),
+                    default=0.0,
+                )
+                radius = inner - wall
+            if radius < d_child + _bu(0.5):
+                raise ValueError(
+                    f"cap: radius {_to_mm(radius)} mm does not reach 0.5 mm into the child "
+                    f"(pivot is {_to_mm(d_child)} mm from it); move the pivot closer or give size_mm"
+                )
+            sphere = _sphere_bm(p, radius)
+            half = _box_bm(p + u * (radius + _bu(1.0)), (2 * radius + _bu(2.0),) * 3, _axis_matrix(u).to_3x3())
+            cap = _bm_boolean(sphere, "INTERSECT", [half])
+            sphere.free()
+            half.free()
+            concave = _sphere_bm(p, radius + c, outer=True)
+            t = time.perf_counter()
+            try:
+                if use_relief:
+                    keep = _sphere_bm(p, radius + c)
+                    relief_bm, rho = _relief_bm(child_obj, parent_obj, p, a, c, rng, keep)
+                    keep.free()
+                    if relief_bm is not None:
+                        _boolean(parent_obj, "DIFFERENCE", [relief_bm])
+                        relief_bm.free()
+                _boolean(parent_obj, "UNION", [cap])
+                _boolean(child_obj, "DIFFERENCE", [concave])
+            finally:
+                cap.free()
+                concave.free()
+            timings["cap_s"] = round(time.perf_counter() - t, 2)
+            built.update(
+                {
+                    "cap_diameter_mm": _to_mm(2 * radius),
+                    "concave_diameter_mm": _to_mm(2 * (radius + c)),
+                    "cap_height_mm": _to_mm(radius - d_child),
+                }
+            )
+            check_radius = radius + _bu(3.0)
+
+        for obj in (parent_obj, child_obj):
+            dropped = _drop_slivers(obj)
+            if dropped:
+                warnings.append(f"removed slivers from {obj.name}: {dropped} mm³")
+        t = time.perf_counter()
+        gaps = _gap_check(parent_obj, child_obj, p, check_radius)
+        timings["measure_s"] = round(time.perf_counter() - t, 2)
+        limit = c_mm - _GAP_TOLERANCE_MM
+        measured = [g for g in (gaps["min_gap_mm"], gaps["local_min_gap_mm"]) if g is not None]
+        gaps["ok"] = bool(measured) and min(measured) >= limit
+        shells = {parent_obj.name: _shell_report(parent_obj), child_obj.name: _shell_report(child_obj)}
+        bad_shells = [n for n, r in shells.items() if r["components"] != 1 or not r["manifold"]]
+        if not gaps["ok"] or bad_shells:
+            raise _JointRejected(
+                {
+                    "error": "joint rejected and rolled back",
+                    "reason": (
+                        f"gap {min(measured) if measured else None} mm is under "
+                        f"{limit:.2f} mm" if not gaps["ok"] else f"not one watertight shell: {bad_shells}"
+                    ),
+                    "measured": gaps,
+                    "parts": shells,
+                    "built": built,
+                }
+            )
+    except BaseException:
+        snap.restore()
+        raise
+    snap.discard()
+
+    pivot_name = _make_pivot(child_obj, parent_obj, p, a)
+    pivot_obj = bpy.data.objects[pivot_name]
+    pivot_obj["bc_joint"] = json.dumps(
+        {"type": joint_type, "parent": parent_obj.name, "clearance_mm": c_mm, "range_deg": rng}
+    )
+    result = {
+        "joint": joint_type,
+        "parent": parent_obj.name,
+        "child": child_obj.name,
+        "pivot": pivot_name,
+        "pivot_mm": _point_mm(p),
+        "axis": [round(x, 6) for x in a],
+        "clearance_mm": c_mm,
+        "range_deg": rng,
+        "built": built,
+        "measured": gaps,
+        "parts": shells,
+    }
+    if test:
+        t = time.perf_counter()
+        span = min(180.0, rng + 45.0)
+        sweep = joints.joint_test(pivot_name, start=-span, end=span, step=2.5 if span <= 90 else 5.0)
+        result["sweep"] = sweep
+        timings["joint_test_s"] = round(time.perf_counter() - t, 2)
+        t = time.perf_counter()
+        pulls = _pull_test(parent_obj, child_obj, {"out": u, "+axis": a, "-axis": -a})
+        result["retention"] = {
+            "slide_before_contact_mm": pulls,
+            "retained": all(v is not None and v <= 1.5 for v in pulls.values()),
+        }
+        timings["pull_test_s"] = round(time.perf_counter() - t, 2)
+        if joint_type == "cap" and not result["retention"]["retained"]:
+            warnings.append("a cap only guides the turn: hold the parts with a pin or ball joint")
+        if sweep["colliding_at_rest"]:
+            warnings.append("the parts touch at rest: see sweep.collisions")
+        elif min(-sweep["free_min"], sweep["free_max"]) + 1e-6 < min(rng, 0.8 * rng + 0.1):
+            warnings.append(
+                f"free range {sweep['free_min']}..{sweep['free_max']} deg is under the "
+                f"designed +-{rng} deg: other geometry blocks it (see sweep.collisions)"
+            )
+    timings["total_s"] = round(time.perf_counter() - t0, 2)
+    result["timings"] = timings
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
+class _JointRejected(Exception):
+    def __init__(self, payload: dict):
+        super().__init__(json.dumps(payload, ensure_ascii=False))
+        self.payload = payload
+
+
+# ---------------------------------------------------------------- fit_clearance
+
+
+def fit_clearance(
+    female: str,
+    male: str,
+    clearance_mm: float = 0.30,
+    pivot=None,
+    axis=None,
+    range_deg: float = 0.0,
+    region_radius_mm: float | None = None,
+) -> dict:
+    """Subtract the male part, grown by the clearance (and swept about a
+    pivot/axis), from the female part: hole for a pin, socket for a ball,
+    notch for a leg that turns."""
+    f_obj, m_obj = _part(female), _part(male)
+    if f_obj == m_obj:
+        raise ValueError("female and male must be different objects")
+    c_mm = _number(clearance_mm, "clearance_mm", 0.05)
+    if c_mm > 1.0:
+        raise ValueError("clearance_mm must be at most 1 mm")
+    c = _bu(c_mm)
+    rng = _number(range_deg, "range_deg", 0.0)
+    if rng > 170:
+        raise ValueError("range_deg must be at most 170")
+    if (pivot is None) != (axis is None):
+        raise ValueError("give both pivot and axis, or neither")
+    if rng > 0 and pivot is None:
+        raise ValueError("range_deg needs a pivot and an axis")
+    t0 = time.perf_counter()
+    male_bm = _world_bm(m_obj)
+    snap = _Snapshot([f_obj])
+    try:
+        if pivot is not None:
+            p, a = _vec_mm(pivot, "pivot"), _direction(axis, "axis")
+        else:
+            p = sum((v.co for v in male_bm.verts), Vector()) / max(1, len(male_bm.verts))
+            a = Vector((0, 0, 1))
+        piece = male_bm
+        if region_radius_mm is not None:
+            radius = _bu(_number(region_radius_mm, "region_radius_mm", 0.0, allow_zero=False))
+            ball = _sphere_bm(p, radius)
+            piece = _bm_boolean(male_bm, "INTERSECT", [ball])
+            ball.free()
+        if len(piece.verts) < 4:
+            raise ValueError("the region does not contain the male part")
+        base = _hull_points([v.co for v in piece.verts])
+        offsets = _ball_offsets(c + _bu(0.01))
+        cutter = _swept_hull([q + o for q in base for o in offsets], p, a, rng)
+        if piece is not male_bm:
+            piece.free()
+        t = time.perf_counter()
+        _boolean(f_obj, "DIFFERENCE", [cutter])
+        t_bool = time.perf_counter() - t
+        cutter.free()
+        _drop_slivers(f_obj)
+        gaps = _gap_check(f_obj, m_obj, p, _bu(1e6))
+        limit = c_mm - _GAP_TOLERANCE_MM
+        measured = [g for g in (gaps["min_gap_mm"], gaps["local_min_gap_mm"]) if g is not None]
+        gaps["ok"] = bool(measured) and min(measured) >= limit
+        shells = {f_obj.name: _shell_report(f_obj)}
+        if not gaps["ok"]:
+            raise _JointRejected({"error": "fit rejected and rolled back", "measured": gaps})
+    except BaseException:
+        snap.restore()
+        raise
+    finally:
+        male_bm.free()
+    snap.discard()
+    return {
+        "female": f_obj.name,
+        "male": m_obj.name,
+        "clearance_mm": c_mm,
+        "range_deg": rng,
+        "measured": gaps,
+        "parts": shells,
+        "note": "the hull of the male region is subtracted: concave male shapes get extra room",
+        "timings_s": {"boolean": round(t_bool, 2), "total": round(time.perf_counter() - t0, 2)},
+    }
+
+
+def boolean_parts(target: str, tools: list[str], operation: str, delete_tools: bool = False) -> dict:
+    op = str(operation).upper()
+    if op not in ("UNION", "DIFFERENCE", "INTERSECT"):
+        raise ValueError("operation must be union, difference or intersect")
+    obj = _part(target)
+    if not tools:
+        raise ValueError("tools must list at least one object")
+    tool_objs = [_part(n) for n in tools]
+    if obj in tool_objs:
+        raise ValueError("target cannot be one of the tools")
+    bms = [_world_bm(o) for o in tool_objs]
+    snap = _Snapshot([obj])
+    try:
+        seconds = _boolean(obj, op, bms)
+        if not obj.data.polygons:
+            raise ValueError("the result is empty")
+    except BaseException:
+        snap.restore()
+        raise
+    finally:
+        for b in bms:
+            b.free()
+    snap.discard()
+    if delete_tools:
+        for o in tool_objs:
+            mesh = o.data
+            bpy.data.objects.remove(o, do_unlink=True)
+            if mesh.users == 0:
+                bpy.data.meshes.remove(mesh)
+    return {
+        "target": obj.name,
+        "operation": op.lower(),
+        "deleted_tools": [n for n in tools] if delete_tools else [],
+        "part": _shell_report(obj),
+        "timings_s": round(seconds, 2),
+    }
+
+
+# ---------------------------------------------------------------- articulate_figure
+
+
+def _quadruped_plan(name: str, analysis: dict, options: dict) -> list[dict]:
+    clearance = float(options.get("clearance_mm", 0.30))
+    legs = str(options.get("legs", "pin")).lower()
+    if legs not in ("pin", "ball", "none"):
+        raise ValueError("plan.legs must be pin, ball or none")
+    leg_range = float(options.get("leg_range_deg", 30.0))
+    steps = []
+    if legs != "none":
+        for leg in analysis["legs"]:
+            part_name = f"{name}_{leg['name']}"
+            if leg["existing_part"]:
+                steps.append(
+                    {
+                        "op": "note",
+                        "text": f"{leg['name']} is already a separate part ({leg['part']}): "
+                        "join it with add_joint (pin with the pivot inside its top) "
+                        "or fit_clearance by hand",
+                    }
+                )
+                continue
+            design = leg[legs]
+            steps.append(
+                {"op": "cut", "part": name, "cutter": design["cutter"], "new_part_name": part_name, "gap_mm": clearance}
+            )
+            steps.append(
+                {
+                    "op": "joint", "parent": name, "child": part_name, "type": legs,
+                    "pivot": design["pivot"], "axis": design["axis"], "size_mm": design["size_mm"],
+                    "clearance_mm": clearance, "range_deg": leg_range,
+                }
+            )
+    if options.get("tail") and analysis.get("tail"):
+        tail = analysis["tail"]["cut"]
+        steps.append({"op": "cut", "part": name, "cutter": tail, "new_part_name": f"{name}_tail", "gap_mm": clearance})
+        normal = Vector(tail["normal"])
+        pivot = (Vector(tail["point"]) - normal * 2.5)
+        steps.append({"op": "joint", "parent": name, "child": f"{name}_tail", "type": "ball",
+                      "pivot": list(pivot), "axis": [0, 0, 1], "clearance_mm": clearance, "range_deg": 30})
+    if options.get("neck") and analysis.get("neck"):
+        neck = analysis["neck"]["cut"]
+        steps.append({"op": "cut", "part": name, "cutter": neck, "new_part_name": f"{name}_head", "gap_mm": clearance})
+        normal = Vector(neck["normal"])
+        depth = float(options.get("neck_ball_mm", 6.0)) / 2 + 3 * clearance + _MIN_WALL_MM + 0.3
+        pivot = Vector(neck["point"]) - normal * depth
+        steps.append({"op": "joint", "parent": name, "child": f"{name}_head", "type": "ball",
+                      "pivot": list(pivot), "axis": [0, 0, 1], "size_mm": float(options.get("neck_ball_mm", 6.0)),
+                      "clearance_mm": clearance, "range_deg": float(options.get("neck_range_deg", 40.0))})
+    if options.get("mid_body") and analysis.get("mid_body"):
+        mid = analysis["mid_body"]["cut"]
+        gap = float(options.get("mid_gap_mm", 1.3))
+        steps.append({"op": "cut", "part": name, "cutter": mid, "new_part_name": f"{name}_rear", "gap_mm": gap})
+        normal = Vector(mid["normal"])
+        pivot = Vector(mid["point"]) - normal * 2.0
+        width_axis = [1, 0, 0] if analysis["width_axis"] == "X" else [0, 1, 0]
+        steps.append({"op": "joint", "parent": name, "child": f"{name}_rear", "type": "cap",
+                      "pivot": list(pivot), "axis": width_axis, "clearance_mm": clearance, "range_deg": 10})
+    return steps
+
+
+def articulate_figure(name: str, plan=None, dry_run: bool = False) -> dict:
+    _part(name)
+    plan = plan or {}
+    if not isinstance(plan, dict):
+        raise ValueError("plan must be an object: {preset, ...options} or {steps: [...]}")
+    t0 = time.perf_counter()
+    if "steps" in plan:
+        steps = plan["steps"]
+        if not isinstance(steps, list) or not steps:
+            raise ValueError("plan.steps must be a non-empty list")
+        analysis = None
+    else:
+        preset = str(plan.get("preset", "quadruped")).lower()
+        if preset != "quadruped":
+            raise ValueError("plan.preset must be quadruped (or give plan.steps)")
+        analysis = analyze_figure(name, plan.get("others"))
+        steps = _quadruped_plan(name, analysis, plan)
+    if dry_run:
+        summary = None
+        if analysis is not None:
+            summary = {
+                "dimensions_mm": analysis["dimensions_mm"],
+                "head_direction": analysis["head_direction"],
+                "legs": [
+                    {"name": l["name"], "part": l["part"], "pin_fits": l.get("pin", {}).get("fits"),
+                     "ball_fits": l.get("ball", {}).get("fits")}
+                    for l in analysis["legs"]
+                ],
+            }
+        return {"name": name, "dry_run": True, "steps": steps, "analysis": summary}
+    done, table = [], []
+    for index, step in enumerate(steps):
+        op = step.get("op")
+        t = time.perf_counter()
+        try:
+            if op == "cut":
+                res = cut_part(step["part"], step["cutter"], step["new_part_name"],
+                               step.get("gap_mm", 0.3), step.get("allow_multiple_shells", False))
+                brief = {"child": res["child"], "parts": {
+                    k: f"{v['components']} shell(s), manifold={v['manifold']}" for k, v in res["parts"].items()}}
+            elif op == "joint":
+                res = add_joint(step["parent"], step["child"], step["type"], step["pivot"], step["axis"],
+                                step.get("size_mm"), step.get("clearance_mm", 0.30), step.get("range_deg"),
+                                step.get("relief"))
+                sweep = res.get("sweep", {})
+                table.append(
+                    {
+                        "joint": f"{res['parent']} -> {res['child']}",
+                        "type": res["joint"],
+                        "pivot": res["pivot"],
+                        "target_clearance_mm": res["clearance_mm"],
+                        "built_min_gap_mm": res["measured"]["min_gap_mm"],
+                        "built_local_gap_mm": res["measured"]["local_min_gap_mm"],
+                        "target_range_deg": res["range_deg"],
+                        "built_range_deg": [sweep.get("free_min"), sweep.get("free_max")],
+                        "retained": res.get("retention", {}).get("retained"),
+                        "ok": res["measured"]["ok"],
+                    }
+                )
+                brief = {"built": res["built"], "warnings": res.get("warnings", [])}
+            elif op == "note":
+                brief = {"note": step.get("text")}
+            else:
+                raise ValueError(f"unknown step op {op!r} (cut, joint or note)")
+        except Exception as exc:  # noqa: BLE001 - reported with the progress
+            detail = exc.payload if isinstance(exc, _JointRejected) else str(exc)
+            return {
+                "name": name,
+                "failed_step": {"index": index, "step": step, "error": detail},
+                "table": table,
+                "completed_steps": done,
+                "timings_s": round(time.perf_counter() - t0, 2),
+                "note": "steps before the failed one stay applied (undo reverts the whole call)",
+            }
+        done.append({"index": index, "op": op, "seconds": round(time.perf_counter() - t, 2), **brief})
+    return {
+        "name": name,
+        "steps": len(steps),
+        "table": table,
+        "completed_steps": done,
+        "timings_s": round(time.perf_counter() - t0, 2),
+    }
+
+
+# ---------------------------------------------------------------- tool handlers
+
+
+def _wrap(fn):
+    def handler(args: dict):
+        try:
+            return json_result(fn(args))
+        except _JointRejected as exc:
+            from .base import ToolResult
+
+            return ToolResult(text=json.dumps(exc.payload, ensure_ascii=False, indent=1), is_error=True)
+
+    return handler
+
+
+_POINT = {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}
+_CUTTER_DOC = (
+    "Cutter (mm, world): {type: plane, point, normal} keeps for the new part "
+    "the side the normal points to; {type: box, center, size, rotation_deg?}; "
+    "{type: cylinder, start, end, radius}; {type: sphere, center, radius}; "
+    "{type: union, parts: [...]} (e.g. a leg box plus a tab that goes up into "
+    "the body to hold a pin)."
+)
+
+register_tool(
+    Tool(
+        name="prepare_mesh",
+        description=(
+            "Make an imported figure workable without losing the sculpt: apply "
+            "modifiers, merge duplicate vertices (merge_mm), remove loose "
+            "geometry, fill holes and fix normals. A voxel remesh runs only "
+            "when the mesh is still not watertight, when shells overlap, or "
+            "when voxel_mm is given (auto size follows the mesh's own edge "
+            "length to keep detail). Decimates only above target_faces "
+            "(default: never). split_shells makes one object per separate "
+            "shell. Reports before/after faces, manifold, shells, dimensions "
+            "(mm), overlapping and near shells (closer than near_gap_mm weld "
+            "when printed) and timings. Booleans stay fast on 500k faces, so "
+            "keep the original resolution."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "target_faces": {"type": "integer"},
+                "voxel_mm": {"type": "number"},
+                "merge_mm": {"type": "number"},
+                "split_shells": {"type": "boolean"},
+                "near_gap_mm": {"type": "number"},
+                "description": {"type": "string"},
+            },
+            "required": ["name"],
+        },
+        handler=_wrap(
+            lambda a: prepare_mesh(
+                str(a["name"]),
+                a.get("target_faces"),
+                a.get("voxel_mm"),
+                float(a.get("merge_mm", 0.001)),
+                bool(a.get("split_shells", False)),
+                float(a.get("near_gap_mm", 0.3)),
+            )
+        ),
+        kind="scene",
+    )
+)
+
+register_tool(
+    Tool(
+        name="analyze_figure",
+        description=(
+            "Read-only layout of a standing figure (Z up, floor at its lowest "
+            "point) for planning articulations: dimensions, length/width axis, "
+            "head direction, belly height, legs (foot islands followed up to "
+            "where they join the body) with ready cut+joint suggestions for a "
+            "pin hinge (leg box plus a tab inside the body, pin across the "
+            "width axis) and a ball joint, neck and tail cut planes, a "
+            "mid-body plane and a left/right mirror check, with confidence. "
+            "others: extra objects that belong to the figure (legs already "
+            "separate). Heuristic: confirm with screenshots before cutting."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "others": {"type": "array", "items": {"type": "string"}},
+                "cell_mm": {"type": "number"},
+            },
+            "required": ["name"],
+        },
+        handler=_wrap(lambda a: analyze_figure(str(a["name"]), a.get("others"), a.get("cell_mm"))),
+        kind="read",
+    )
+)
+
+register_tool(
+    Tool(
+        name="cut_part",
+        description=(
+            "Split a part with EXACT booleans: the new part is what lies inside "
+            "the cutter, the original keeps the rest minus the cutter grown by "
+            "gap_mm (default 0.30, the print-in-place clearance; 0 for a "
+            "glued split). Cut faces are filled; both results must be one "
+            "watertight shell or the cut is rolled back. " + _CUTTER_DOC +
+            " Returns both parts' topology and timings."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "cutter": {"type": "object"},
+                "new_part_name": {"type": "string"},
+                "gap_mm": {"type": "number"},
+                "allow_multiple_shells": {"type": "boolean"},
+                "description": {"type": "string"},
+            },
+            "required": ["name", "cutter", "new_part_name"],
+        },
+        handler=_wrap(
+            lambda a: cut_part(
+                str(a["name"]), a["cutter"], str(a["new_part_name"]), a.get("gap_mm", 0.3),
+                bool(a.get("allow_multiple_shells", False)),
+            )
+        ),
+        kind="scene",
+    )
+)
+
+register_tool(
+    Tool(
+        name="add_joint",
+        description=(
+            "Build a real print-in-place joint between two separate parts "
+            "(mm, world). type pin: the pivot is INSIDE the child; a hole of "
+            "pin + 2 x clearance crosses the child along axis and a pin of "
+            "size_mm (diameter) is fused to the parent, anchored in its walls "
+            "on both sides. type ball: the pivot is inside the PARENT, beyond "
+            "the child; a ball of size_mm on a neck joins the child, the parent "
+            "gets the socket (ball + clearance) with a retaining lip of 1.2 mm+ "
+            "and a swing slot for +-range_deg about axis. type cap: a spherical "
+            "cap of size_mm grows from the parent into a concave face in the "
+            "child (guide only; hold the parts with a pin or ball). relief "
+            "(default on for pin and ball) carves the parent where the child "
+            "turns through +-range_deg. Then every gap is MEASURED: under "
+            "clearance - 0.02 mm, or a part not one watertight shell, rolls "
+            "everything back with an error. On success the child gets the "
+            "pivot BC_Pivo_<child> and the result has the measured gaps, the "
+            "joint_test sweep (free range), a pull test (retained), walls and "
+            "timings. clearance_mm: 0.30 print-in-place, 0.20 assembled; "
+            "never scale it with the model."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "parent": {"type": "string"},
+                "child": {"type": "string"},
+                "type": {"type": "string", "enum": list(_JOINT_TYPES)},
+                "pivot": _POINT,
+                "axis": _POINT,
+                "size_mm": {"type": "number"},
+                "clearance_mm": {"type": "number"},
+                "range_deg": {"type": "number"},
+                "relief": {"type": "boolean"},
+                "test": {"type": "boolean"},
+                "description": {"type": "string"},
+            },
+            "required": ["parent", "child", "type", "pivot", "axis"],
+        },
+        handler=_wrap(
+            lambda a: add_joint(
+                str(a["parent"]), str(a["child"]), a["type"], a["pivot"], a["axis"],
+                a.get("size_mm"), a.get("clearance_mm", 0.30), a.get("range_deg"),
+                a.get("relief"), bool(a.get("test", True)),
+            )
+        ),
+        kind="scene",
+    )
+)
+
+register_tool(
+    Tool(
+        name="fit_clearance",
+        description=(
+            "Give two existing parts a real clearance: subtract from the "
+            "female part the male part (or the piece of it within "
+            "region_radius_mm of the pivot) grown by clearance_mm and, with "
+            "pivot + axis + range_deg, swept through +-range_deg so the male "
+            "can turn. Use it to open holes for pins, sockets for balls and "
+            "notches for legs of a model that already has separate parts. The "
+            "convex hull of the male region is used. Measures the gap and "
+            "rolls back if it is under clearance - 0.02 mm."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "female": {"type": "string"},
+                "male": {"type": "string"},
+                "clearance_mm": {"type": "number"},
+                "pivot": _POINT,
+                "axis": _POINT,
+                "range_deg": {"type": "number"},
+                "region_radius_mm": {"type": "number"},
+                "description": {"type": "string"},
+            },
+            "required": ["female", "male"],
+        },
+        handler=_wrap(
+            lambda a: fit_clearance(
+                str(a["female"]), str(a["male"]), a.get("clearance_mm", 0.30), a.get("pivot"),
+                a.get("axis"), a.get("range_deg", 0.0), a.get("region_radius_mm"),
+            )
+        ),
+        kind="scene",
+    )
+)
+
+register_tool(
+    Tool(
+        name="boolean_parts",
+        description=(
+            "EXACT boolean between parts: union (fuse a ball or pin into a "
+            "part), difference (subtract hole solids) or intersect. tools are "
+            "object names; delete_tools removes them afterwards. Rolls back if "
+            "the result is empty. Reports the target's shells and timing."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string"},
+                "tools": {"type": "array", "items": {"type": "string"}},
+                "operation": {"type": "string", "enum": ["union", "difference", "intersect"]},
+                "delete_tools": {"type": "boolean"},
+                "description": {"type": "string"},
+            },
+            "required": ["target", "tools", "operation"],
+        },
+        handler=_wrap(
+            lambda a: boolean_parts(
+                str(a["target"]), list(a["tools"]), a["operation"], bool(a.get("delete_tools", False))
+            )
+        ),
+        kind="scene",
+    )
+)
+
+register_tool(
+    Tool(
+        name="articulate_figure",
+        description=(
+            "Run a whole articulation plan in one call and return a "
+            "target-vs-built table with measured clearances and free ranges. "
+            "plan {preset: 'quadruped', legs: 'pin'|'ball'|'none', neck: bool, "
+            "tail: bool, mid_body: bool, clearance_mm: 0.30, leg_range_deg: 30, "
+            "others: [separate parts]} builds the steps from analyze_figure; "
+            "or plan {steps: [{op: 'cut', part, cutter, new_part_name, gap_mm}, "
+            "{op: 'joint', parent, child, type, pivot, axis, size_mm, "
+            "clearance_mm, range_deg}]}. dry_run returns the steps without "
+            "changing anything. One undo step. On heavy meshes (300k+ faces) "
+            "prefer dry_run and then cut_part/add_joint one by one: each "
+            "call must finish within 2 minutes."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "plan": {"type": "object"},
+                "dry_run": {"type": "boolean"},
+                "description": {"type": "string"},
+            },
+            "required": ["name"],
+        },
+        handler=_wrap(lambda a: articulate_figure(str(a["name"]), a.get("plan"), bool(a.get("dry_run", False)))),
+        kind="scene",
+    )
+)
