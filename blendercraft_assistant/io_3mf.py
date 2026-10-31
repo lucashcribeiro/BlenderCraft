@@ -1,14 +1,26 @@
-"""Minimal 3MF reader and writer (core spec, one mesh object per item).
+"""3MF reader and writer.
 
-Exports are always in millimeters: vertices are converted from Blender units
-with ``mm_per_bu`` and the model declares ``unit="millimeter"``.
+Exports follow the core spec, one mesh object per item, always in
+millimeters: vertices are converted from Blender units with ``mm_per_bu`` and
+the model declares ``unit="millimeter"``.
+
+The reader also understands the Production extension (components that point
+into other model parts of the package with ``p:path``, as Bambu Studio and
+PrusaSlicer write them) and, best effort, Bambu Studio's project metadata for
+part names and filament colors. Model parts are streamed, so files with
+millions of triangles import without building an XML tree.
 """
 
+import json
+import posixpath
+import re
 import zipfile
+from array import array
 from xml.etree import ElementTree as ET
 
 import bmesh
 import bpy
+import numpy as np
 from mathutils import Matrix
 
 from .tools.inspect import _evaluated_world_mesh
@@ -193,14 +205,6 @@ def export_3mf(path: str, objects: list, mm_per_bu: float) -> list[str]:
     return written_names
 
 
-def _local(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
-
-
-def _children(el: ET.Element, name: str):
-    return [c for c in el.iter() if _local(c.tag) == name]
-
-
 def _model_path(zf: zipfile.ZipFile) -> str:
     """Model part named by the package relationships, or the usual path."""
     if "_rels/.rels" in zf.namelist():
@@ -241,79 +245,468 @@ def _material_for(color_hex: str, cache: dict):
     return cache[color_hex]
 
 
-def import_3mf(path: str, mm_per_bu: float) -> list:
-    """Create one Blender object per mesh object placed by the build items.
+# --- Import -------------------------------------------------------------
 
-    The file's ``unit`` is converted to Blender units, item transforms are
-    applied, and a material is created from the base material color. Objects
-    no build item references are imported at the origin.
+_PROD_PATH = "{http://schemas.microsoft.com/3dmanufacturing/production/2015/06}path"
+_HEX_COLOR = re.compile(r"^#?([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$")
+_BAMBU_SETTINGS = "Metadata/model_settings.config"
+_BAMBU_PROJECT = "Metadata/project_settings.config"
+_MAX_DEPTH = 64
+
+
+class _Obj:
+    """One ``<object>`` of a model part (a mesh, or a list of components)."""
+
+    __slots__ = (
+        "id", "name", "type", "pid", "pindex", "coords", "tris", "first_tri",
+        "components",
+    )
+
+    def __init__(self, attrib):
+        self.id = attrib.get("id")
+        self.name = attrib.get("name")
+        self.type = attrib.get("type") or "model"
+        self.pid = attrib.get("pid")
+        self.pindex = attrib.get("pindex")
+        self.coords = None  # array('f') in BU once a <mesh> is seen
+        self.tris = None  # array('I'), three indices per triangle
+        self.first_tri = None  # (pid, p1) of the first triangle
+        self.components = []  # [(p:path or None, objectid, transform)]
+
+
+class _Part:
+    """A parsed model part: objects, build items and base material groups."""
+
+    def __init__(self, path):
+        self.path = path
+        self.scale = 1.0  # Blender units per file unit
+        self.objects: dict[str, _Obj] = {}
+        self.items: list[tuple[str, str | None]] = []
+        self.groups: dict[str, list[str | None]] = {}
+
+
+def _parse_part(stream, path: str, mm_per_bu: float) -> _Part:
+    """Stream one model part into flat arrays (no XML tree is kept).
+
+    Vertices are converted to Blender units as they are read; the children of
+    ``<vertices>``/``<triangles>`` are dropped as soon as they are consumed so
+    memory stays flat for very large meshes.
     """
-    with zipfile.ZipFile(path) as zf:
-        root = ET.fromstring(zf.read(_model_path(zf)))
+    part = _Part(path)
+    scale = 1.0
+    local_names: dict[str, str] = {}
+    obj = coords = tris = container = group = None
+    try:
+        for event, el in ET.iterparse(stream, events=("start", "end")):
+            tag = el.tag
+            name = local_names.get(tag)
+            if name is None:
+                name = local_names[tag] = tag.rsplit("}", 1)[-1]
+            if event == "start":
+                if name == "vertices" or name == "triangles":
+                    container = el
+                elif name == "object":
+                    obj = _Obj(el.attrib)
+                    part.objects[obj.id] = obj
+                elif name == "mesh":
+                    if obj is not None:
+                        obj.coords = coords = array("f")
+                        obj.tris = tris = array("I")
+                elif name == "basematerials":
+                    group = part.groups.setdefault(el.get("id"), [])
+                elif name == "model":
+                    unit = el.get("unit", "millimeter")
+                    if unit not in UNIT_MM:
+                        raise ValueError(f"Unknown 3MF unit: {unit!r}")
+                    part.scale = scale = UNIT_MM[unit] / mm_per_bu
+                continue
+            if name == "vertex":
+                a = el.attrib
+                coords.extend(
+                    (
+                        float(a["x"]) * scale,
+                        float(a["y"]) * scale,
+                        float(a["z"]) * scale,
+                    )
+                )
+                container.clear()
+            elif name == "triangle":
+                a = el.attrib
+                if obj.first_tri is None:
+                    obj.first_tri = (a.get("pid"), a.get("p1"))
+                tris.extend((int(a["v1"]), int(a["v2"]), int(a["v3"])))
+                container.clear()
+            elif name == "component":
+                if obj is not None:
+                    a = el.attrib
+                    obj.components.append(
+                        (a.get(_PROD_PATH) or a.get("path"), a.get("objectid"), a.get("transform"))
+                    )
+            elif name == "item":
+                part.items.append((el.get("objectid"), el.get("transform")))
+            elif name == "base":
+                if group is not None:
+                    group.append(el.get("displaycolor"))
+            elif name == "basematerials":
+                group = None
+            elif name == "mesh":
+                coords = tris = None
+            elif name == "object":
+                obj = None
+    except (KeyError, OverflowError) as exc:
+        raise ValueError(f"Malformed 3MF model part {path!r}: {exc!r}") from exc
+    return part
 
-    unit = root.get("unit", "millimeter")
-    if unit not in UNIT_MM:
-        raise ValueError(f"Unknown 3MF unit: {unit!r}")
-    scale = UNIT_MM[unit] / mm_per_bu
 
-    groups: dict[str, list[str]] = {}
-    for group in _children(root, "basematerials"):
-        groups[group.get("id")] = [
-            b.get("displaycolor") for b in group if _local(b.tag) == "base"
-        ]
+class _Package:
+    """Lazy access to the model parts of a 3MF package."""
 
-    meshes = {}
-    for obj_el in _children(root, "object"):
-        mesh_el = next((c for c in obj_el if _local(c.tag) == "mesh"), None)
-        if mesh_el is None:
+    def __init__(self, zf: zipfile.ZipFile, mm_per_bu: float):
+        self.zf = zf
+        self.mm_per_bu = mm_per_bu
+        self._lower = {n.lower(): n for n in zf.namelist()}
+        self._parts: dict[str, _Part] = {}
+
+    def resolve(self, path: str) -> str | None:
+        """Zip member name for a package part path, or None if absent."""
+        name = posixpath.normpath(path.lstrip("/"))
+        if name in self._lower.values():
+            return name
+        return self._lower.get(name.lower())
+
+    def part(self, path: str) -> _Part:
+        if path not in self._parts:
+            with self.zf.open(path) as stream:
+                self._parts[path] = _parse_part(stream, path, self.mm_per_bu)
+        return self._parts[path]
+
+    def related(self, part_path: str) -> list[str]:
+        """Model parts the given part's relationships point to."""
+        folder, base = posixpath.split(part_path)
+        rels_name = self.resolve(posixpath.join(folder, "_rels", base + ".rels"))
+        if rels_name is None:
+            return []
+        try:
+            rels = ET.fromstring(self.zf.read(rels_name))
+        except ET.ParseError:
+            return []
+        found = []
+        for rel in rels:
+            target = rel.get("Target")
+            if rel.get("Type") != _MODEL_REL_TYPE or not target:
+                continue
+            if not target.startswith("/"):
+                target = posixpath.join(folder, target)
+            name = self.resolve(target)
+            if name is not None:
+                found.append(name)
+        return found
+
+
+class _Leaf:
+    """A mesh object reached through the build, with its composed matrix."""
+
+    __slots__ = ("part", "obj", "matrix", "top", "label", "index", "ncomp")
+
+    def __init__(self, part, obj, matrix, top, label, index, ncomp):
+        self.part = part
+        self.obj = obj
+        self.matrix = matrix
+        self.top = top  # id of the build item's (or orphan's) object
+        self.label = label  # name of the nearest named container
+        self.index = index  # top-level component this leaf comes from
+        self.ncomp = ncomp  # number of top-level components
+
+
+def _component_target(pkg: _Package, part: _Part, comp, problems: list):
+    """Part holding the object a component points to, or None."""
+    path, oid, _ = comp
+    if path:
+        name = pkg.resolve(path)
+        if name is None:
+            problems.append(f"component part {path!r} is not in the package")
+            return None
+        return pkg.part(name)
+    if oid in part.objects:
+        return part
+    for name in pkg.related(part.path):
+        sub = pkg.part(name)
+        if oid in sub.objects:
+            return sub
+    problems.append(f"component object {oid} not found from {part.path}")
+    return None
+
+
+def _walk(pkg, part, oid, matrix, ctx, leaves, problems, stack):
+    """Collect mesh leaves below ``oid``; matrices compose as in 3MF.
+
+    3MF uses row vectors, so a vertex goes through its component transform
+    first and the parent's (or the build item's) transform after it; with
+    Blender's column matrices that is ``item @ component @ ...``.
+    """
+    obj = part.objects.get(oid)
+    if obj is None:
+        problems.append(f"object {oid} not found in {part.path}")
+        return
+    if obj.type != "model" or len(stack) > _MAX_DEPTH:
+        return
+    key = (part.path, oid)
+    if key in stack:
+        problems.append(f"component cycle through object {oid} in {part.path}")
+        return
+    top, label, index, ncomp = ctx
+    label = obj.name or label
+    if obj.coords is not None:
+        if obj.tris:
+            leaves.append(_Leaf(part, obj, matrix, top, label, index, ncomp))
+        return
+    inner = stack | {key}
+    for position, comp in enumerate(obj.components):
+        target = _component_target(pkg, part, comp, problems)
+        if target is None:
             continue
-        verts = [
-            (float(v.get("x")) * scale, float(v.get("y")) * scale, float(v.get("z")) * scale)
-            for v in _children(mesh_el, "vertex")
-        ]
-        tri_els = _children(mesh_el, "triangle")
-        tris = [(int(t.get("v1")), int(t.get("v2")), int(t.get("v3"))) for t in tri_els]
-        color = _declared_color(obj_el, tri_els, groups)
-        meshes[obj_el.get("id")] = (obj_el.get("name"), verts, tris, color)
-
-    placements = [
-        (item.get("objectid"), item.get("transform"))
-        for item in _children(root, "item")
-        if item.get("objectid") in meshes
-    ]
-    if not meshes:
-        raise ValueError(
-            "No mesh objects found in the 3MF file (objects made only of "
-            "components are not supported)"
+        child = (
+            (top, label, position, len(obj.components))
+            if not stack
+            else (top, label, index, ncomp)
         )
-    placed = {oid for oid, _ in placements}
-    placements += [(oid, None) for oid in meshes if oid not in placed]
+        _walk(
+            pkg,
+            target,
+            comp[1],
+            matrix @ _item_matrix(comp[2], part.scale),
+            child,
+            leaves,
+            problems,
+            inner,
+        )
+
+
+class _BambuPart:
+    __slots__ = ("name", "extruder", "subtype")
+
+    def __init__(self, name, extruder, subtype):
+        self.name, self.extruder, self.subtype = name, extruder, subtype
+
+
+class _BambuObject:
+    __slots__ = ("name", "extruder", "parts", "order")
+
+    def __init__(self, name, extruder):
+        self.name, self.extruder = name, extruder
+        self.parts: dict[str, _BambuPart] = {}
+        self.order: list[_BambuPart] = []
+
+
+def _positive_int(value) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _read_bambu_objects(zf: zipfile.ZipFile) -> dict[str, _BambuObject]:
+    """Object/part names and extruders from Bambu's model_settings.config."""
+    if _BAMBU_SETTINGS not in zf.namelist():
+        return {}
+    try:
+        root = ET.fromstring(zf.read(_BAMBU_SETTINGS))
+    except (ET.ParseError, ValueError, KeyError):
+        return {}
+
+    def meta(el) -> dict[str, str]:
+        return {
+            m.get("key"): m.get("value")
+            for m in el.findall("metadata")
+            if m.get("key") is not None
+        }
+
+    objects = {}
+    for el in root.findall("object"):
+        values = meta(el)
+        bobj = _BambuObject(values.get("name"), _positive_int(values.get("extruder")))
+        for part_el in el.findall("part"):
+            pv = meta(part_el)
+            bpart = _BambuPart(
+                pv.get("name"), _positive_int(pv.get("extruder")), part_el.get("subtype")
+            )
+            bobj.order.append(bpart)
+            if part_el.get("id") is not None:
+                bobj.parts[part_el.get("id")] = bpart
+        if el.get("id") is not None:
+            objects[el.get("id")] = bobj
+    return objects
+
+
+def _read_bambu_colors(zf: zipfile.ZipFile) -> list[str | None]:
+    """``filament_colour`` of project_settings.config, bad entries as None."""
+    if _BAMBU_PROJECT not in zf.namelist():
+        return []
+    try:
+        data = json.loads(zf.read(_BAMBU_PROJECT))
+        colors = data.get("filament_colour")
+    except (ValueError, AttributeError, KeyError):
+        return []
+    if not isinstance(colors, list):
+        return []
+    return [
+        "#" + c.lstrip("#").upper() if isinstance(c, str) and _HEX_COLOR.match(c) else None
+        for c in colors
+    ]
+
+
+def _declared_color(obj: _Obj, groups) -> str | None:
+    """Display color from the object's pid/pindex or its first triangle."""
+    pid, index = obj.pid, obj.pindex
+    if pid is None and obj.first_tri is not None:
+        pid, index = obj.first_tri
+    if pid is None or index is None:
+        return None
+    colors = groups.get(pid)
+    try:
+        color = colors[int(index)] if colors else None
+    except (ValueError, IndexError):
+        return None
+    return color if color and _HEX_COLOR.match(color) else None
+
+
+def _build_mesh(name: str, obj: _Obj):
+    """Mesh datablock from the flat arrays, filled with ``foreach_set``."""
+    if not len(obj.coords) or not len(obj.tris):
+        raise ValueError(f"3MF object {obj.id} has no vertices or triangles")
+    coords = np.frombuffer(obj.coords, dtype=np.float32)
+    corners = np.frombuffer(obj.tris, dtype=np.dtype(f"u{obj.tris.itemsize}"))
+    vert_count = coords.size // 3
+    if int(corners.max()) >= vert_count:
+        raise ValueError(
+            f"3MF object {obj.id} has triangle indices outside its vertex list"
+        )
+    mesh = bpy.data.meshes.new(name)
+    try:
+        mesh.vertices.add(vert_count)
+        mesh.loops.add(corners.size)
+        mesh.polygons.add(corners.size // 3)
+        mesh.vertices.foreach_set("co", coords)
+        mesh.polygons.foreach_set(
+            "loop_start", np.arange(0, corners.size, 3, dtype=np.int32)
+        )
+        mesh.polygons.foreach_set("vertices", corners.astype(np.int32))
+        mesh.shade_flat()
+        mesh.update(calc_edges=True)
+    except Exception:
+        bpy.data.meshes.remove(mesh)
+        raise
+    return mesh
+
+
+def _leaf_name(leaf: _Leaf, bambu_obj, part_info) -> str:
+    return (
+        (part_info.name if part_info else None)
+        or leaf.obj.name
+        or leaf.label
+        or (bambu_obj.name if bambu_obj else None)
+        or f"Object{leaf.obj.id}"
+    )
+
+
+def _bambu_part(bambu_obj, leaf: _Leaf):
+    """Bambu part record of a leaf: by position when counts agree, else id."""
+    if bambu_obj is None:
+        return None
+    if leaf.index is not None and len(bambu_obj.order) == leaf.ncomp:
+        return bambu_obj.order[leaf.index]
+    return bambu_obj.parts.get(leaf.obj.id)
+
+
+def import_3mf(path: str, mm_per_bu: float, warnings: list | None = None) -> list:
+    """Create one Blender object per mesh reached from the build items.
+
+    Handles core-spec files and the Production extension: components are
+    resolved across model parts (``p:path``, or the part relationships) and
+    nested; each part's ``unit`` is converted to Blender units and transforms
+    compose as component then item. Only ``type="model"`` objects are
+    imported; root-model objects nothing references are imported at the
+    origin. Materials come from base material colors, else (Bambu Studio
+    files) from the part's extruder in ``filament_colour``; Bambu part names
+    are used when present. Unresolvable references are skipped and described
+    in ``warnings`` (if given); an error is raised only when nothing at all
+    could be imported.
+    """
+    problems: list[str] = []
+    with zipfile.ZipFile(path) as zf:
+        pkg = _Package(zf, mm_per_bu)
+        root_name = pkg.resolve(_model_path(zf))
+        if root_name is None:
+            raise ValueError("The 3MF file has no 3D model part")
+        root = pkg.part(root_name)
+        bambu_objects = _read_bambu_objects(zf)
+        bambu_colors = _read_bambu_colors(zf)
+
+        leaves: list[_Leaf] = []
+        referenced = set()
+        for oid, transform in root.items:
+            referenced.add(oid)
+            matrix = _item_matrix(transform, root.scale)
+            _walk(pkg, root, oid, matrix, (oid, None, None, 0), leaves, problems, frozenset())
+        for obj in root.objects.values():
+            for comp_path, comp_oid, _ in obj.components:
+                if not comp_path or pkg.resolve(comp_path) == root_name:
+                    referenced.add(comp_oid)
+        for oid, obj in root.objects.items():
+            if oid not in referenced:
+                _walk(
+                    pkg, root, oid, Matrix.Identity(4), (oid, None, None, 0),
+                    leaves, problems, frozenset(),
+                )
+        if warnings is not None:
+            warnings.extend(problems)
+
+        wanted = []
+        for leaf in leaves:
+            bambu_obj = bambu_objects.get(leaf.top)
+            part_info = _bambu_part(bambu_obj, leaf)
+            if part_info and part_info.subtype not in (None, "normal_part"):
+                continue  # negative parts, modifiers, support blockers
+            color = _declared_color(leaf.obj, leaf.part.groups)
+            if color is None:
+                extruder = (part_info.extruder if part_info else None) or (
+                    bambu_obj.extruder if bambu_obj else None
+                )
+                if extruder and extruder <= len(bambu_colors):
+                    color = bambu_colors[extruder - 1]
+            wanted.append((leaf, _leaf_name(leaf, bambu_obj, part_info), color))
+        if not wanted:
+            detail = "; ".join(problems[:3]) or "no model-type object with a mesh"
+            raise ValueError(f"No mesh objects found in the 3MF file ({detail})")
+
+        meshes = []
+        cache: dict = {}
+        try:
+            for leaf, name, _ in wanted:
+                key = (leaf.part.path, leaf.obj.id)
+                if key in cache:
+                    mesh = cache[key].copy()  # instances stay independent
+                    mesh.name = name
+                    mesh.materials.clear()
+                else:
+                    mesh = cache[key] = _build_mesh(name, leaf.obj)
+                meshes.append(mesh)
+        except Exception:
+            for mesh in cache.values():
+                bpy.data.meshes.remove(mesh)
+            for mesh in meshes:
+                if mesh.name in bpy.data.meshes:
+                    bpy.data.meshes.remove(mesh)
+            raise
 
     materials: dict = {}
     created = []
-    for index, (oid, transform) in enumerate(placements):
-        name, verts, tris, color = meshes[oid]
-        name = name or f"Object{oid}"
-        mesh = bpy.data.meshes.new(name)
-        mesh.from_pydata(verts, [], tris)
-        mesh.update()
+    for (leaf, name, color), mesh in zip(wanted, meshes):
         if color:
             mesh.materials.append(_material_for(color, materials))
         obj = bpy.data.objects.new(name, mesh)
         bpy.context.collection.objects.link(obj)
-        obj.matrix_world = _item_matrix(transform, scale)
+        obj.matrix_world = leaf.matrix
         created.append(obj)
     return created
-
-
-def _declared_color(obj_el, tri_els, groups) -> str | None:
-    """Display color from the object's pid/pindex or its first triangle."""
-    pid, index = obj_el.get("pid"), obj_el.get("pindex")
-    if pid is None and tri_els:
-        pid, index = tri_els[0].get("pid"), tri_els[0].get("p1")
-    if pid is None or index is None:
-        return None
-    colors = groups.get(pid)
-    if not colors or int(index) >= len(colors):
-        return None
-    return colors[int(index)]
