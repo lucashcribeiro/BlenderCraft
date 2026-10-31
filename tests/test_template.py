@@ -27,6 +27,24 @@ def load_template():
     return module
 
 
+EXTENSION = "bl_ext.user_default.blendercraft_assistant"
+
+
+@contextlib.contextmanager
+def _without_extension_modules():
+    """Hide the extension's modules, as if it were not enabled yet. The
+    developer's own install may make it importable here."""
+    saved = {name: mod for name, mod in sys.modules.items() if name.startswith(EXTENSION)}
+    for name in saved:
+        del sys.modules[name]
+    try:
+        yield
+    finally:
+        for name in [n for n in sys.modules if n.startswith(EXTENSION)]:
+            del sys.modules[name]
+        sys.modules.update(saved)
+
+
 def fresh_startup_file():
     bpy.ops.wm.read_factory_settings(use_empty=False)
 
@@ -160,15 +178,23 @@ class SetupNewFileTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_falls_back_to_direct_units_without_the_extension(self):
-        # The extension is not installed here; the lookup must not raise.
-        self.assertNotIn(EXT_UNITS, sys.modules)
+        # The extension is not loaded; the lookup must not raise.
         scene = bpy.context.scene
         scene.unit_settings.system = "IMPERIAL"
         scene.unit_settings.scale_length = 1.0
-        self.template.apply_units(scene)
+        with _without_extension_modules():
+            self.template.apply_units(scene)
         self.assertEqual(scene.unit_settings.system, "METRIC")
         self.assertAlmostEqual(scene.unit_settings.scale_length, 0.001, places=6)
         self.assertEqual(scene.unit_settings.length_unit, "MILLIMETERS")
+
+    def test_units_never_import_the_extension(self):
+        # Importing it before addon_utils.enable() makes enable() reload the
+        # package ("module changed on disk ... reloading").
+        with _without_extension_modules():
+            self.template.apply_units(bpy.context.scene)
+            loaded = [name for name in sys.modules if name.startswith(EXTENSION)]
+        self.assertEqual(loaded, [])
 
 
 class RegisterTest(unittest.TestCase):

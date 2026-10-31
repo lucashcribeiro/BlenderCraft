@@ -9,7 +9,7 @@ Nothing from the extension is imported at module level, so this module also
 loads in background mode without the extension installed.
 """
 
-import importlib
+import sys
 
 import bpy
 from bpy.app.handlers import persistent
@@ -33,11 +33,12 @@ _enable_attempts = 0
 
 
 def apply_units(scene) -> None:
-    """1 BU = 1 mm shown in millimeters, through the extension when present."""
-    try:
-        units = importlib.import_module(f"{EXTENSION}.units")
-    except ImportError:
-        units = None
+    """1 BU = 1 mm shown in millimeters, through the extension when loaded.
+
+    Never imports the extension: a module imported before
+    addon_utils.enable() has no load time recorded, and enable() then
+    reloads the whole package ("module changed on disk ... reloading")."""
+    units = sys.modules.get(f"{EXTENSION}.units")
     if units is not None:
         units.apply_internal_mm(scene)
         return
