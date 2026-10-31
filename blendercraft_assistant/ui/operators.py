@@ -11,6 +11,7 @@ from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper
 
 from .. import runtime
+from ..gen3d import jobs as gen3d_jobs
 from ..i18n import t
 from ..tools.dispatch import call_tool
 from ..tools.joints import create_pivot, joint_test, reset
@@ -24,6 +25,10 @@ MAX_ATTACHED_OBJECTS = 20
 # Enter's key release must follow the field's commit within this time.
 ENTER_WINDOW = 0.6  # seconds
 MAX_FILE_CHARS = 200_000  # text read from an attached file
+# Attached images: shown to Claude up to this size (the API takes 5 MB of
+# base64 per image); larger ones go by path only.
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+MAX_IMAGE_SHOWN = 3_750_000
 
 # Shown in the panel: the last joint test and the last attachment problem.
 joint_result = ""
@@ -44,6 +49,36 @@ def build_attachments(context) -> tuple[list[dict], list[str]]:
     scope = tracker.ai_scope() if tracker is not None else nullcontext()
     with scope:
         return _build_attachments(context)
+
+
+def _image_blocks(item, warnings: list[str]) -> list[dict]:
+    """An attached image for Claude, and its path so tools can use it (for
+    example as image_paths of generate_3d_model)."""
+    note = {
+        "type": "text",
+        "text": (
+            f"Attached image: {item.name}\nPath: {item.path}\n"
+            "(usable as image_paths in generate_3d_model)"
+        ),
+    }
+    mime = IMAGE_TYPES.get(os.path.splitext(item.path)[1].lower())
+    try:
+        size = os.path.getsize(item.path)
+        data = None
+        if mime is not None and size <= MAX_IMAGE_SHOWN:
+            with open(item.path, "rb") as fh:
+                data = fh.read()
+    except OSError as exc:
+        warnings.append(t("attach_failed", err=exc))
+        return []
+    if data is None:
+        note["text"] += "\n(not shown: too large to display)"
+        return [note]
+    image = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": mime, "data": base64.b64encode(data).decode("ascii")},
+    }
+    return [image, note]
 
 
 def _build_attachments(context) -> tuple[list[dict], list[str]]:
@@ -83,7 +118,10 @@ def _build_attachments(context) -> tuple[list[dict], list[str]]:
                 }
             )
     for item in props.attached_files:
-        blocks.append({"type": "text", "text": f"Attached file: {item.name}\n\n{item.content}"})
+        if item.path:
+            blocks.extend(_image_blocks(item, warnings))
+        else:
+            blocks.append({"type": "text", "text": f"Attached file: {item.name}\n\n{item.content}"})
     props.attach_view = False
     props.attach_selection = False
     props.attached_files.clear()
@@ -259,10 +297,20 @@ class BC_OT_attach_file(Operator, ImportHelper):
     bl_label = t("attach_file")
     bl_description = t("attach_file_desc")
 
-    filter_glob: StringProperty(default="*.md;*.markdown;*.txt", options={"HIDDEN"})
+    filter_glob: StringProperty(
+        default="*.md;*.markdown;*.txt;*.png;*.jpg;*.jpeg;*.webp", options={"HIDDEN"}
+    )
     filepath: StringProperty(subtype="FILE_PATH", options={"HIDDEN", "SKIP_SAVE"})
 
     def execute(self, context):
+        if os.path.splitext(self.filepath)[1].lower() in IMAGE_TYPES:
+            if not os.path.isfile(self.filepath):
+                self.report({"ERROR"}, self.filepath)
+                return {"CANCELLED"}
+            item = context.window_manager.bc.attached_files.add()
+            item.name = os.path.basename(self.filepath)
+            item.path = os.path.abspath(self.filepath)
+            return {"FINISHED"}
         try:
             with open(self.filepath, encoding="utf-8", errors="replace") as fh:
                 content = fh.read(MAX_FILE_CHARS + 1)
@@ -322,6 +370,17 @@ class BC_OT_stop(Operator):
 
     def execute(self, context):
         runtime.stop_session()
+        return {"FINISHED"}
+
+
+class BC_OT_gen3d_cancel(Operator):
+    bl_idname = "bc.gen3d_cancel"
+    bl_label = t("gen3d_cancel")
+    bl_description = t("gen3d_cancel")
+
+    def execute(self, context):
+        gen3d_jobs.registry.cancel_all()
+        runtime.tag_redraw()
         return {"FINISHED"}
 
 
@@ -552,6 +611,7 @@ CLASSES = (
     BC_OT_attach_file,
     BC_OT_remove_file,
     BC_OT_stop,
+    BC_OT_gen3d_cancel,
     BC_OT_new_chat,
     BC_OT_open_conversation,
     BC_OT_delete_conversation,

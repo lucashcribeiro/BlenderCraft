@@ -75,10 +75,12 @@ class BC_ChatLine(PropertyGroup):
 
 
 class BC_AttachedFile(PropertyGroup):
-    """A text file attached to the next message (name shown as a chip)."""
+    """A file attached to the next message (name shown as a chip): a text
+    file (its content) or an image (its path, read when sending)."""
 
     name: StringProperty()
     content: StringProperty()
+    path: StringProperty()  # set for images only
 
 
 class BC_Props(PropertyGroup):

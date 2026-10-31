@@ -12,6 +12,8 @@ import bpy
 from bpy.types import Panel
 
 from .. import runtime
+from ..gen3d import jobs as gen3d_jobs
+from ..tools import gen3d as gen3d_tool
 from ..i18n import t
 from ..units import UNIT_LABELS, get_display_unit, mm_per_bu
 from . import chat_list, draft, operators
@@ -84,6 +86,18 @@ def _draw_claude_problem(layout, context) -> None:
     _text_lines(box, context, t("claude_login" if problem == "login" else "claude_missing"), alert=True)
 
 
+def _draw_generations(layout, context) -> None:
+    """One line per running AI 3D generation, with a cancel button."""
+    for job in gen3d_jobs.registry.running():
+        row = layout.row(align=True)
+        percent = f"{job.percent}%" if job.percent is not None else ""
+        row.label(
+            text=t("gen3d_running", provider=job.provider.capitalize(), stage=job.stage, percent=percent),
+            icon="TIME",
+        )
+        row.operator("bc.gen3d_cancel", text="", icon="CANCEL")
+
+
 def _draw_header(layout, status: str) -> None:
     """Status badge on the left, chat buttons on the right."""
     row = layout.row(align=True)
@@ -106,6 +120,7 @@ def _extra_rows(session, props) -> int:
     if draft.exists(props):
         extra += draft.PREVIEW_LINES + 2
     extra += len(props.attached_files)
+    extra += len(gen3d_jobs.registry.running())
     if session is not None and session.queue:
         extra += 1
     if runtime.pending_approval is not None:
@@ -165,7 +180,7 @@ def _draw_input_card(layout, context, session, props, status: str) -> None:
         _draw_draft(card, context, props)
     for index, item in enumerate(props.attached_files):
         chip = card.row(align=True)
-        chip.label(text=item.name, icon="FILE_TEXT")
+        chip.label(text=item.name, icon="FILE_IMAGE" if item.path else "FILE_TEXT")
         op = chip.operator("bc.remove_file", text="", icon="X")
         op.index = index
     card.prop(
@@ -220,6 +235,7 @@ class VIEW3D_PT_bc_assistant(Panel):
         _draw_approval(layout, context)
         _draw_claude_problem(layout, context)
         _draw_header(layout, status)
+        _draw_generations(layout, context)
 
         row = layout.row(align=True)
         row.label(text=t("provider"), icon="LIGHT")
@@ -304,6 +320,8 @@ class VIEW3D_PT_bc_settings(Panel):
             "bc.set_unit", "unit", text=UNIT_LABELS[get_display_unit(context.scene)]
         )
         layout.operator("bc.copy_mcp_command", text=t("copy_mcp"), icon="COPYDOWN")
+        if not gen3d_tool.has_any_key():
+            _text_lines(layout, context, t("gen3d_key_hint"))
 
 
 def draw_unit_header(self, context) -> None:

@@ -213,7 +213,7 @@ class DraftTest(_Base):
         self.assertEqual(bpy.ops.bc.attach_file(filepath=str(path)), {"FINISHED"})
         self.assertEqual([f.name for f in self.bc.attached_files], ["plano.md"])
         props = bpy.ops.bc.attach_file.get_rna_type().properties
-        self.assertEqual(props["filter_glob"].default, "*.md;*.markdown;*.txt")
+        self.assertEqual(props["filter_glob"].default, "*.md;*.markdown;*.txt;*.png;*.jpg;*.jpeg;*.webp")
         # Only files attached: the message names them.
         self.assertEqual(bpy.ops.bc.send(), {"FINISHED"})
         ((text, attachments),) = self.session.sent
