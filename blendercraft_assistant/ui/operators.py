@@ -105,7 +105,7 @@ def _runtime_ready(op) -> bool:
 def _take_input(context) -> str:
     props = context.window_manager.bc
     text = props.input.strip()
-    props.input = ""  # empty: the update callback does not send again
+    props.input = ""
     return text
 
 
@@ -136,8 +136,7 @@ class BC_OT_send_now(Operator):
         if text:
             submit(context, text, now=True)
             return {"FINISHED"}
-        # Enter (or leaving the field) already queued the text: promote the
-        # newest queued message instead.
+        # Nothing typed: promote the newest queued message instead.
         session = runtime.ensure_session()
         if not session.queue:
             return {"CANCELLED"}

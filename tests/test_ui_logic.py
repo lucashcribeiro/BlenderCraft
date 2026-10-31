@@ -258,18 +258,22 @@ class OperatorsTest(unittest.TestCase):
         self.addCleanup(lambda: bpy.data.objects.get(name) and bpy.data.objects.remove(bpy.data.objects[name], do_unlink=True))
         return cube
 
-    def test_input_enter_sends_once_and_clears(self):
+    def test_committing_the_field_does_not_send(self):
+        # Blender commits the field on Enter and on clicking elsewhere alike;
+        # only the Send button sends.
         self.bc.input = "  crie um cubo  "
+        self.assertEqual(self.session.sent, [])
+        self.assertEqual(self.bc.input, "  crie um cubo  ")
+        self.assertEqual(bpy.ops.bc.send(), {"FINISHED"})
         self.assertEqual(self.session.sent, [("crie um cubo", [])])
         self.assertEqual(self.bc.input, "")
         self.bc.input = "   "
+        self.assertEqual(bpy.ops.bc.send(), {"CANCELLED"})
         self.assertEqual(len(self.session.sent), 1)
 
     def test_send_before_runtime_is_up_keeps_text(self):
         with mock.patch.object(self.runtime, "server", None):
-            self.bc.input = "crie um cubo"  # Enter
-            self.assertEqual(self.bc.input, "crie um cubo")
-            self.assertEqual(self.operators.notice, i18n.t("server_off"))
+            self.bc.input = "crie um cubo"
             self.assertEqual(bpy.ops.bc.send(), {"CANCELLED"})
             self.session.queue[:] = [("um", [])]
             self.assertEqual(bpy.ops.bc.send_now(), {"CANCELLED"})
@@ -343,6 +347,7 @@ class OperatorsTest(unittest.TestCase):
         self.add_cube("Peca")
         self.bc.attach_selection = True
         self.bc.input = "o que tem aqui?"
+        bpy.ops.bc.send()
         ((text, attachments),) = self.session.sent
         self.assertEqual(text, "o que tem aqui?")
         self.assertIn("Peca", attachments[0]["text"])

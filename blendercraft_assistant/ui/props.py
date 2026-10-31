@@ -21,31 +21,6 @@ from ..tools.joints import set_angle
 MODEL_DEFAULT = "DEFAULT"
 ANGLE_TOLERANCE = 1e-4  # degrees
 
-_clearing_input = False
-
-
-def _on_input(self, context):
-    """Enter in the message field sends it. Clearing the field fires this
-    update again; the flag and the empty-text check stop the recursion."""
-    global _clearing_input
-    if _clearing_input:
-        return
-    text = self.input.strip()
-    if not text:
-        return
-    from . import operators
-
-    if not runtime.ready():  # keep the text so it can be sent later
-        operators.notice = t("server_off")
-        runtime.tag_redraw()
-        return
-    _clearing_input = True
-    try:
-        self.input = ""
-    finally:
-        _clearing_input = False
-    operators.submit(context, text)
-
 
 def _on_mode(self, context):
     runtime.set_mode(self.mode)
@@ -78,7 +53,10 @@ def _on_joint_angle(self, context):
 
 
 class BC_Props(PropertyGroup):
-    input: StringProperty(name=t("message"), update=_on_input)
+    # No update callback: Blender commits a text field the same way on Enter
+    # and on a click elsewhere, so sending on update would also send on a
+    # stray click. The Send button (bc.send) sends.
+    input: StringProperty(name=t("message"))
     mode: EnumProperty(
         name=t("mode"),
         items=[
