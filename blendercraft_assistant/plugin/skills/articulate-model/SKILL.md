@@ -6,7 +6,9 @@ description: Use when the user imported a ready model (STL/3MF from MakerWorld/M
 # Articulate an imported model (print-in-place)
 
 The binding spec is `reference/projeto-executivo-articulacao-quadrupedes.md`
-(read sections 1, 5, 7, 8 and 11 before the first cut). Its core rule: **the
+(read sections 1, 5, 7, 8 and 11 before the first cut), **amended by the
+engineering review `reference/revisao-perna-padrao.md`** for the leg, the
+pocket and the arch (it wins where they differ). Its core rule: **the
 sculpt is the product**. Never remesh, smooth or decimate the whole model;
 only the cut zones change, and you prove it with `compare_surface`.
 
@@ -24,6 +26,24 @@ only the cut zones change, and you prove it with `compare_surface`.
   heavy meshes.
 - **If the legs are in print pose, never refuse to measure**: use
   `measure_standing` (or `set_pose standing` -> measure -> `set_pose print`).
+
+## The standard leg (review, built by the default template)
+- Leg section T x W with 45 deg chamfers (T/4); its top inside the body is
+  turned about the pin axis (radius T/2), so the clearance stays 0.30 through
+  0-90 deg.
+- Pivot **T/2 above the belly line** (not 0.38 H), over the foot. Turned flat,
+  the leg lies on the bed with the belly.
+- Pin along the body, 0.071 H (min 2.0), flat underside 0.2, embedded
+  >= 1.5 (min 1.2) with >= 1.2 of wall beyond the tip; hole = pin + 0.6, a
+  teardrop with its 45 deg tip up in the print pose.
+- Pocket = the leg swept 0 -> 90 deg outward + 0.30. From the side it is an
+  arch (flat top, 45 deg corners) only up to belly + T + 0.3; the thigh cap
+  above stays closed. Spine between left/right pockets >= 2.4 (the plan
+  shrinks the knuckle if needed). Stops near +94 / -4 deg come from the
+  geometry.
+- Waist ball shrinks itself to keep >= 1.2 of wall around the socket, and the
+  waist faces get a V relief so the lateral swing reaches +-10 deg.
+- Check with `joint_clearance_sweep(pivot, 0, 90, 5)`: every angle >= 0.28.
 
 ## Templates
 To articulate a new model, apply the default template **cachorrinho-2.0**
@@ -50,8 +70,8 @@ split model (SolidCraft names: 01- front body, 02- rear body,
    collection BC_Plano. Take `screenshot`s (iso, front, side, bottom), show
    the table, ask for confirmation. Adjust options (clearance_mm, legs,
    waist, leg_range_deg, leg_axis 'walk') if the user wants.
-5. **Build in short calls**: `articulate_figure(name, plan={steps: <steps>,
-   only: [i, i+1]})` for each cut + joint pair (helpers are removed
+5. **Build in short calls**: `articulate_figure(name, plan={steps: 'scene',
+   only: [i, i+1]})` (the plan saved by apply_articulation_template) for each cut + joint pair (helpers are removed
    automatically). Read every table row: `ok` (gap >= clearance - 0.02),
    `built_range_deg` covering the target, `retained`. On a failed step: read
    the error (shell volumes, gap, walls), fix the step (pivot, size_mm,
@@ -60,7 +80,9 @@ split model (SolidCraft names: 01- front body, 02- rear body,
    part; `compare_surface(original="<name> (STL original)")` - 100 %
    identical outside the changed zones (waist, under the thighs);
    `joint_test` 0-90 deg on each leg in 5 deg steps.
-7. **Print pose**: `set_pose print` (legs flat, body on the bed), screenshot,
+7. **Print pose**: `set_pose print` (legs flat, body on the bed); read its
+   `bed` report (parts floating above the bed, first-layer gaps < 0.30),
+   screenshot,
    then `export_file` .3mf with all parts (not the hidden original, not the
    pivots) - separate objects, assembled, in mm. `set_pose rest` undoes the
    posing.
