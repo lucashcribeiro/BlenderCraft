@@ -1,13 +1,17 @@
 """Runs registered tools with undo steps, change tracking and truncation."""
 
+import logging
 import threading
 import traceback
 from contextlib import nullcontext
 from dataclasses import replace
 
+from .. import log as bclog
 from .. import viewport
 from ..undo import ChangeTracker, push_step
 from .base import REGISTRY, ToolResult, truncate
+
+log = logging.getLogger(__name__)
 
 # Tracker of the off-main-thread tool call running on this thread.
 _local = threading.local()
@@ -34,6 +38,19 @@ def scene_step(fn, label: str, tracker: ChangeTracker | None = None):
             viewport.mark_dirty()
 
 
+def _log_failure(name: str, text: str, crashed: bool = False) -> None:
+    """Tool errors go to the extension log (a crash with its traceback; an
+    error result, such as the traceback of the model's own code, truncated)."""
+    try:
+        bclog.ensure()
+        if crashed:
+            log.error("tool %s crashed:\n%s", name, text)
+        else:
+            log.warning("tool %s returned an error: %s", name, text[:2000])
+    except Exception:  # noqa: BLE001 - logging must never break a tool call
+        pass
+
+
 def call_tool(
     name: str, args: dict, tracker: ChangeTracker | None = None
 ) -> ToolResult:
@@ -57,6 +74,10 @@ def call_tool(
         # unwind into Blender's main loop (quitting it or killing the timer).
         except BaseException:  # noqa: BLE001 - reported as an error result
             result = ToolResult(text=traceback.format_exc(), is_error=True)
+            _log_failure(name, result.text, crashed=True)
+        else:
+            if result.is_error:
+                _log_failure(name, result.text)
         # Pushed even after a failure: the handler may have changed the scene
         # before raising, and the step keeps that change undoable.
         if tool.kind == "scene" and tool.push_undo:
@@ -87,6 +108,10 @@ def _call_off_main(tool, args: dict, tracker: ChangeTracker | None) -> ToolResul
         result = tool.handler(args)
     except BaseException:  # noqa: BLE001 - reported as an error result
         result = ToolResult(text=traceback.format_exc(), is_error=True)
+        _log_failure(tool.name, result.text, crashed=True)
+    else:
+        if result.is_error:
+            _log_failure(tool.name, result.text)
     finally:
         _local.tracker = None
     return replace(result, text=truncate(result.text))

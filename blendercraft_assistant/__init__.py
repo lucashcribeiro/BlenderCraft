@@ -20,6 +20,9 @@ def _start_runtime():
         runtime.start()
     except Exception:  # noqa: BLE001 - must not break Blender's event loop
         traceback.print_exc()
+        import logging
+
+        logging.getLogger(__name__).exception("the runtime did not start")
     return None
 
 
@@ -39,9 +42,10 @@ def register():
 def unregister():
     import bpy
 
-    from . import runtime, ui
+    from . import log, runtime, ui
 
     if bpy.app.timers.is_registered(_start_runtime):
         bpy.app.timers.unregister(_start_runtime)
     runtime.stop()
     ui.unregister()
+    log.shutdown()

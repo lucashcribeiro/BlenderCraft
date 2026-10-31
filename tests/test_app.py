@@ -19,6 +19,8 @@ ICON = SCRIPTS / "assets" / "BlenderCraft.png"
 
 FAKE_BLENDER = """#!/bin/bash
 for a in "$@"; do printf '%s\\n' "$a"; done > "$ARGS_OUT"
+echo "blender says hello"
+echo "blender complains" >&2
 """
 
 
@@ -32,9 +34,19 @@ class LauncherTest(unittest.TestCase):
         self.fake.write_text(FAKE_BLENDER, encoding="utf-8")
         self.fake.chmod(0o755)
         self.out = self.tmp / "args.txt"
+        self.log_dir = self.tmp / "logs"
+
+    def env(self, **extra):
+        return dict(
+            os.environ,
+            BLENDERCRAFT_BLENDER=str(self.fake),
+            BLENDERCRAFT_LOG_DIR=str(self.log_dir),
+            ARGS_OUT=str(self.out),
+            **extra,
+        )
 
     def launch(self, *args, cwd=None):
-        env = dict(os.environ, BLENDERCRAFT_BLENDER=str(self.fake), ARGS_OUT=str(self.out))
+        env = self.env()
         result = subprocess.run(
             ["bash", str(LAUNCHER), *args],
             env=env,
@@ -66,12 +78,73 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(args[-1], str(self.tmp.resolve() / "parts" / "a.stl"))
 
     def test_open_without_a_file_fails(self):
-        env = dict(os.environ, BLENDERCRAFT_BLENDER=str(self.fake), ARGS_OUT=str(self.out))
         result = subprocess.run(
-            ["bash", str(LAUNCHER), "--open"], env=env, capture_output=True, text=True, timeout=30
+            ["bash", str(LAUNCHER), "--open"], env=self.env(), capture_output=True, text=True, timeout=30
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.out.exists())
+
+
+    # ---- log file --------------------------------------------------------
+
+    @property
+    def log(self):
+        return self.log_dir / "blendercraft.log"
+
+    def test_blender_output_is_appended_to_the_log_with_a_header_per_launch(self):
+        self.launch("/m/a.stl")
+        self.launch()
+        text = self.log.read_text(encoding="utf-8")
+        self.assertEqual(text.count("blender says hello"), 2)
+        self.assertEqual(text.count("blender complains"), 2)  # stderr too
+        headers = [l for l in text.splitlines() if l.startswith("=== ")]
+        self.assertEqual(len(headers), 2)
+        self.assertRegex(headers[0], r"^=== \d{4}-\d\d-\d\d \d\d:\d\d:\d\d BlenderCraft: ")
+        self.assertIn("--app-template blendercraft", headers[0])
+        self.assertIn("/m/a.stl", headers[0])
+        # The header comes before the output of its launch.
+        self.assertLess(text.index("==="), text.index("blender says hello"))
+
+    def test_launcher_prints_nothing_itself(self):
+        env = self.env()
+        result = subprocess.run(
+            ["bash", str(LAUNCHER)], env=env, cwd=self.tmp, capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual((result.stdout, result.stderr), ("", ""))
+
+    def test_the_log_folder_is_created(self):
+        self.assertFalse(self.log_dir.exists())
+        self.launch()
+        self.assertTrue(self.log.is_file())
+
+    def test_a_log_above_10_mb_is_rotated_to_dot_1(self):
+        self.log_dir.mkdir()
+        self.log.write_bytes(b"x" * (10 * 1024 * 1024 + 1))
+        (self.log_dir / "blendercraft.log.1").write_text("older", encoding="utf-8")
+        self.launch()
+        rotated = self.log_dir / "blendercraft.log.1"
+        self.assertEqual(rotated.stat().st_size, 10 * 1024 * 1024 + 1)  # replaced
+        text = self.log.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("=== "))
+        self.assertIn("blender says hello", text)
+
+    def test_a_small_log_is_not_rotated(self):
+        self.log_dir.mkdir()
+        self.log.write_text("previous run\n", encoding="utf-8")
+        self.launch()
+        self.assertFalse((self.log_dir / "blendercraft.log.1").exists())
+        self.assertTrue(self.log.read_text(encoding="utf-8").startswith("previous run\n"))
+
+    def test_blender_still_starts_when_the_log_folder_is_not_writable(self):
+        blocker = self.tmp / "file"
+        blocker.write_text("not a folder", encoding="utf-8")
+        env = self.env()
+        env["BLENDERCRAFT_LOG_DIR"] = str(blocker / "sub")
+        result = subprocess.run(
+            ["bash", str(LAUNCHER)], env=env, cwd=self.tmp, capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.out.exists())
 
 
 class IconTest(unittest.TestCase):
@@ -158,7 +231,9 @@ class BuildAppTest(unittest.TestCase):
         self.assertIn("on open", source)
         self.assertIn("BlenderCraft.command", source)
         self.assertIn("quoted form of", source)
-        self.assertIn("> /dev/null 2>&1 &", source)
+        # Output is no longer discarded: the launcher logs it.
+        self.assertNotIn("/dev/null", source)
+        self.assertIn('" &"', source)
 
     def test_signature_is_valid(self):
         result = subprocess.run(

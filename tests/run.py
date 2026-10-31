@@ -10,7 +10,9 @@ semantics as unittest's -k. Exits with status 1 if any test fails.
 """
 
 import argparse
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -35,6 +37,9 @@ def _name_patterns() -> list[str] | None:
 
 
 def main() -> None:
+    # The extension's log file must not land in the user's real log folder.
+    if not os.environ.get("BLENDERCRAFT_LOG_DIR"):
+        os.environ["BLENDERCRAFT_LOG_DIR"] = tempfile.mkdtemp(prefix="blendercraft-logs-")
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     loader = unittest.TestLoader()

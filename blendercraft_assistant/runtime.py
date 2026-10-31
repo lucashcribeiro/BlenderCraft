@@ -19,6 +19,7 @@ from pathlib import Path
 import bpy
 from bpy.app.handlers import persistent
 
+from . import log as bclog
 from . import mainthread
 from .claude.process import TOOL_PREFIX, ClaudeProcess, build_args, find_claude
 from .claude.session import MAX_TOOL_CALLS, NOTE_KEYS, AgentSession
@@ -91,9 +92,13 @@ def start() -> None:
     global server, token, store, tracker
     if server is not None:
         return
+    bclog.ensure()
     load_all()
     try:
         token = secrets.token_urlsafe(32)
+        bclog.add_secret(token)
+        for key in ("meshy_api_key", "tripo_api_key"):
+            bclog.add_secret(_pref(key, ""))
         tracker = ChangeTracker()
         if store is None:
             store = ConversationStore()
@@ -115,7 +120,9 @@ def start() -> None:
             srv = McpServer(handler, token, 0)
             srv.start()
         server = srv
+        log.info("runtime started: MCP server at %s", srv.url)
     except BaseException:
+        log.exception("runtime failed to start")
         stop()
         raise
 
@@ -130,11 +137,14 @@ def stop() -> None:
     # Cleared first: requests still queued for the approval lock see it and
     # deny instead of showing up after the deny below.
     srv, server = server, None
+    if srv is not None:
+        log.info("runtime stopping")
     _deny_pending("The Blender assistant was stopped.")
     if session is not None:
         try:
             session.close()
         except Exception:  # noqa: BLE001 - shutting down regardless
+            log.exception("closing the session failed")
             traceback.print_exc()
         session = None
     reset_namespace()
@@ -454,6 +464,7 @@ def _spawn(resume_id, on_line, on_exit):
     claude = find_claude(_pref("claude_path", ""))
     if claude is None:
         claude_problem = "missing"
+        log.warning("Claude Code not found (preference path: %r)", _pref("claude_path", ""))
         raise RuntimeError(t("claude_missing"))
     if claude_problem == "missing":
         claude_problem = ""
@@ -490,8 +501,10 @@ def _spawn(resume_id, on_line, on_exit):
     try:
         proc.start()
     except BaseException:
+        log.exception("could not start Claude Code (%s)", claude)
         proc.stop()  # removes the temp MCP config file
         raise
+    log.info("Claude Code started (%s, resume=%s)", claude, bool(resume_id))
     return _BackgroundStop(proc)
 
 
@@ -521,6 +534,10 @@ def _deliver_exit(on_exit, code: int, tail: str) -> None:
     global claude_problem
     if code != 0 and _looks_like_login(tail):
         claude_problem = "login"
+    if code != 0:
+        log.warning("Claude Code exited with code %s; stderr tail: %s", code, tail.strip()[-1000:])
+    else:
+        log.info("Claude Code exited with code 0")
     on_exit(code, tail)
     tag_redraw()
 

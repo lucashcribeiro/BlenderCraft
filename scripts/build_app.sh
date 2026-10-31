@@ -31,14 +31,16 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # The applet only finds its bundled launcher and runs it in the background;
-# the launcher builds Blender's command line.
+# the launcher builds Blender's command line and appends Blender's output to
+# ~/Library/Logs/BlenderCraft/blendercraft.log (it closes the pipe that
+# "do shell script" waits on by redirecting before it starts Blender).
 cat > "$WORK/BlenderCraft.applescript" <<'APPLESCRIPT'
 on launcherPath()
 	return (POSIX path of (path to me)) & "Contents/Resources/BlenderCraft.command"
 end launcherPath
 
 on run
-	do shell script quoted form of launcherPath() & " > /dev/null 2>&1 &"
+	do shell script quoted form of launcherPath() & " &"
 end run
 
 on open theFiles
@@ -46,7 +48,7 @@ on open theFiles
 	repeat with theFile in theFiles
 		set command to command & " " & quoted form of (POSIX path of theFile)
 	end repeat
-	do shell script command & " > /dev/null 2>&1 &"
+	do shell script command & " &"
 end open
 APPLESCRIPT
 

@@ -50,6 +50,10 @@ scripts/BlenderCraft.command
 
 A extensão é habilitada pelo próprio template, e a aba **Assistente** já abre na barra lateral (tecla N) da 3D View.
 
+### Logs
+
+Para diagnosticar erros, o lançador (`BlenderCraft.command`, e o app que o usa) grava tudo o que o Blender escreve no terminal em `~/Library/Logs/BlenderCraft/blendercraft.log`, com uma linha de data e hora a cada abertura. Acima de 10 MB o arquivo vira `blendercraft.log.1`. A própria extensão registra em `extension.log`, na mesma pasta, o início e o fim do runtime, os erros das ferramentas (com o traceback) e o código de saída e o final do stderr do Claude Code. Tokens e chaves de API nunca são gravados.
+
 ### Abrir arquivos STL e 3MF
 
 - **No Finder**: clique com o botão direito no arquivo `.stl` ou `.3mf`, **Abrir com › BlenderCraft**. O BlenderCraft não vira o app padrão desses arquivos (nem dos `.blend`); ele só aparece na lista do **Abrir com**. Para torná-lo padrão, use **Obter Informações › Abrir com › Alterar Tudo** no Finder.
