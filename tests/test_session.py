@@ -280,6 +280,16 @@ class SessionQueueTest(SessionTestBase):
         self.feed_fixture(session, "text_turn")
         self.assertEqual(self.procs[0].sent[1], [{"type": "text", "text": "dois"}, image])
 
+    def test_undo_and_redo_are_not_changes(self):
+        for name in ("undo", "redo", "build"):
+            self.kinds[name] = "scene"
+        session = self.make()
+        session.send("x")
+        for i, name in enumerate(("build", "undo", "redo"), start=1):
+            session.handle_line(tool_started_line(i, name))
+            session.handle_line(tool_finished_line(i))
+        self.assertEqual(session.changes, 1)
+
     def test_changes_count(self):
         self.kinds["build"] = "scene"
         self.kinds["look"] = "read"
@@ -484,6 +494,30 @@ class SessionStopTest(SessionTestBase):
         for i in range(10, 12):
             session.handle_line(tool_started_line(i))
         self.assertEqual(session.status, "WORKING")
+
+    def test_skill_calls_do_not_count_towards_the_limit(self):
+        def skill_line(i):
+            return json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "id": f"sk{i}", "name": "Skill", "input": {}}
+                        ]
+                    },
+                }
+            )
+
+        session = self.make(max_tool_calls=2)
+        session.send("x")
+        for i in range(5):
+            session.handle_line(skill_line(i))
+        session.handle_line(tool_started_line(1))
+        session.handle_line(tool_started_line(2))
+        self.assertEqual(session.status, "WORKING")
+        session.handle_line(tool_started_line(3))
+        self.assertEqual(session.status, "IDLE")
+        self.assertIn("STEP LIMIT NOTE", self.conv.messages[1].text)
 
     def test_step_limit_note_follows_existing_text(self):
         session = self.make(max_tool_calls=1)

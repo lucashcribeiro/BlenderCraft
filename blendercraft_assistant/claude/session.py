@@ -60,6 +60,10 @@ class ProcessLike(Protocol):
 
 
 MAX_TOOL_CALLS = 40  # per user request; also told to the model in the prompt
+# Built-in Skill only reads the plugin's skills: not a step of the work.
+UNCOUNTED_TOOLS = frozenset({"Skill"})
+# Scene tools that move on the undo stack instead of changing the scene.
+NOT_CHANGES = frozenset({"undo", "redo"})
 
 
 class AgentSession:
@@ -97,7 +101,8 @@ class AgentSession:
 
         self.status = IDLE
         self.queue: list[tuple[str, list[dict]]] = []
-        self.changes = 0  # successful "scene" tool calls in this conversation
+        # Successful "scene" tool calls in this conversation, undo/redo aside.
+        self.changes = 0
         self.error = ""
 
         self._process: ProcessLike | None = None
@@ -108,7 +113,7 @@ class AgentSession:
         # a turn cleanly. SessionStarted does not count: the CLI announces
         # the session before it loads the history, so a resume can still fail.
         self._resume_pending = False
-        self._tool_count = 0  # ToolStarted in the current turn
+        self._tool_count = 0  # ToolStarted in the current turn, Skill aside
         self._user_index = 0  # position of the current turn's user message
         self._assistant: Message | None = None
         # A text block started: its first delta begins a new paragraph.
@@ -310,7 +315,8 @@ class AgentSession:
         if existing is not None:  # same block seen again
             existing.input = event.input
             return
-        self._tool_count += 1
+        if event.name not in UNCOUNTED_TOOLS:
+            self._tool_count += 1
         self._assistant.tools.append(
             ToolCall(event.tool_use_id, event.name, event.input)
         )
@@ -326,7 +332,11 @@ class AgentSession:
             return
         tool.output = event.output
         tool.status = "error" if event.is_error else "ok"
-        if not event.is_error and self._tool_kinds(tool.name) == "scene":
+        if (
+            not event.is_error
+            and tool.name not in NOT_CHANGES
+            and self._tool_kinds(tool.name) == "scene"
+        ):
             self.changes += 1
 
     def _turn_finished(self, event: TurnFinished) -> None:
