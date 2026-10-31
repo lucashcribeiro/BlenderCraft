@@ -8,6 +8,9 @@ from blendercraft_assistant.claude.system_prompt import build_system_prompt, con
 ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "blendercraft_assistant" / "plugin"
 SKILLS = ("blender-map", "design", "printing", "joints")
+# Every skill folder in the plugin (SKILLS are the ones the prompt names).
+ALL_SKILLS = SKILLS + ("organic-modeling",)
+ORGANIC = PLUGIN / "skills" / "organic-modeling"
 
 
 def frontmatter(text: str) -> dict:
@@ -86,7 +89,7 @@ class PluginTests(unittest.TestCase):
         )
         self.assertEqual(manifest["name"], "blendercraft")
         self.assertEqual(manifest["version"], "0.1.0")
-        for name in SKILLS:
+        for name in ALL_SKILLS:
             path = PLUGIN / "skills" / name / "SKILL.md"
             fields = frontmatter(path.read_text(encoding="utf-8"))
             self.assertEqual(fields.get("name"), name, path)
@@ -94,4 +97,74 @@ class PluginTests(unittest.TestCase):
 
     def test_no_stray_skill_folders(self):
         found = sorted(p.parent.name for p in (PLUGIN / "skills").glob("*/SKILL.md"))
-        self.assertEqual(found, sorted(SKILLS))
+        self.assertEqual(found, sorted(ALL_SKILLS))
+
+    def test_organic_skill_ships_its_kit_and_reference(self):
+        for name in ("kit.py", "articulated.py", "reference/articulated-puppy-35mm.md"):
+            self.assertTrue((ORGANIC / name).is_file(), name)
+        text = (ORGANIC / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("NOT", text)
+        self.assertIn("remesh_smooth", text)
+
+
+def _load_kit():
+    """The loader snippet from organic-modeling/SKILL.md (bc_kit only)."""
+    import sys
+    import types
+
+    import blendercraft_assistant  # noqa: F401 - the loader looks it up
+
+    if "bc_kit" not in sys.modules:
+        pkg = next(m for n, m in list(sys.modules.items())
+                   if n.rsplit(".", 1)[-1] == "blendercraft_assistant")
+        p = Path(pkg.__file__).parent / "plugin/skills/organic-modeling" / "kit.py"
+        mod = types.ModuleType("bc_kit")
+        mod.__file__ = str(p)
+        exec(compile(p.read_text(), str(p), "exec"), mod.__dict__)
+        sys.modules["bc_kit"] = mod
+    return sys.modules["bc_kit"]
+
+
+class OrganicKitTests(unittest.TestCase):
+    def setUp(self):
+        import bpy
+
+        self.bpy = bpy
+        self.kit = _load_kit()
+        self.before = set(bpy.data.objects.keys())
+
+    def tearDown(self):
+        for obj in list(self.bpy.data.objects):
+            if obj.name not in self.before:
+                self.kit.delete(obj)
+
+    def test_blockout_remesh_smooth_gives_one_manifold_shell(self):
+        kit = self.kit
+        body = kit.blob("KitTestBody", [
+            ("cap", (0, 0, 6), 3.0, 3.0, (0, 0, 90)),
+            ("ball", (0, -5, 10), 3.5),
+            ("ell", (2.5, 3, 3), (1.5, 1.5, 3.0)),
+        ], resolution=0.5)
+        kit.remesh_smooth(body, voxel=0.4, iterations=6)
+        self.assertEqual(kit.topology(body), (1, True))
+        kit.fit(body, size=(None, None, 12.0), low=(None, None, 0.0))
+        lo, hi = kit.bounds(body)
+        self.assertAlmostEqual(lo.z, 0.0, places=4)
+        self.assertAlmostEqual(hi.z - lo.z, 12.0, places=3)
+
+    def test_mirror_is_a_true_mirror(self):
+        kit = self.kit
+        left = kit.sphere("KitTestLeft", (5, 0, 0), (2, 1, 1))
+        right = kit.mirror_x(left, "KitTestRight")
+        lo, hi = kit.bounds(right)
+        self.assertAlmostEqual(lo.x, -7.0, places=4)
+        self.assertAlmostEqual(hi.x, -3.0, places=4)
+        import bmesh
+        volumes = []
+        for obj in (left, right):
+            bm = bmesh.new()
+            bm.from_mesh(obj.data)
+            volumes.append(bm.calc_volume(signed=True))
+            bm.free()
+        self.assertGreater(volumes[1], 0)  # normals still point out
+        self.assertAlmostEqual(volumes[0], volumes[1], places=4)
