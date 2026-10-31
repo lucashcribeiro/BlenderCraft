@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = ROOT / "blendercraft_assistant" / "plugin"
 SKILLS = ("blender-map", "design", "printing", "joints")
 # Every skill folder in the plugin (SKILLS are the ones the prompt names).
-ALL_SKILLS = SKILLS + ("organic-modeling", "quality-workflow")
+ALL_SKILLS = SKILLS + ("organic-modeling", "quality-workflow", "articulate-model")
 ORGANIC = PLUGIN / "skills" / "organic-modeling"
 
 
