@@ -6,9 +6,9 @@ Submodules import bpy; they are only imported by register()/unregister()
 
 
 def _modules():
-    from . import operators, panel, prefs, props
+    from . import io_ops, operators, panel, prefs, props
 
-    return (props, prefs, operators, panel)
+    return (props, prefs, operators, io_ops, panel)
 
 
 def register() -> None:
