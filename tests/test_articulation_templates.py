@@ -148,7 +148,9 @@ class TemplateTest(unittest.TestCase):
         legs = [r for r in plan["table"] if r["item"].startswith("leg_")]
         self.assertEqual(len(legs), 4)
         for row in legs:
-            self.assertAlmostEqual(row["pivot_above_belly_mm"], row["knuckle_radius_mm"], delta=0.05)
+            # T/2 above the belly (or half the paw, when the paw is wider).
+            self.assertGreaterEqual(row["pivot_above_belly_mm"], row["knuckle_radius_mm"] - 0.05)
+            self.assertLess(row["pivot_above_belly_mm"], row["knuckle_radius_mm"] + 2.0)
         spines = [r for r in plan["table"] if r["item"].startswith("spine_")]
         self.assertTrue(all(r["mm"] >= 2.4 for r in spines), spines)
         steps = tpl.scene_plan()

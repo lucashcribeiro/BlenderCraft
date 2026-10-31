@@ -387,7 +387,7 @@ def _vertical_run(tree: BVHTree, x: float, y: float, z_from: float, floor: float
     return None
 
 
-def _pivot_in_part(name: str, want_z: float, dp_mm: float, c: float):
+def _pivot_in_part(name: str, want_z: float | None, dp_mm: float, c: float):
     """Deepest point inside a separate leg near the wanted pivot height:
     searched on vertical lines through the centre of the part's upper half.
     Returns (point, distance to the surface) or None."""
@@ -401,6 +401,13 @@ def _pivot_in_part(name: str, want_z: float, dp_mm: float, c: float):
         tree = BVHTree.FromBMesh(bm)
     finally:
         bm.free()
+    if want_z is None:
+        # The knuckle: its centre half a leg width below the top, so little
+        # of the part sits above the pin and swings inward.
+        xs = [p.x for p in upper]
+        ys = [p.y for p in upper]
+        half = min(max(xs) - min(xs), max(ys) - min(ys)) / 2
+        want_z = z_hi - half
     need = art._bu(dp_mm / 2) + c + art._bu(1.0)
     best, best_fit = None, None
     for i in range(41):
@@ -417,6 +424,37 @@ def _pivot_in_part(name: str, want_z: float, dp_mm: float, c: float):
             if best is None or depth > best[1]:
                 best = (p, depth)
     return best_fit or best
+
+
+def _narrowest_section(tree, head, li, wi, centre_w, belly, top, around, span):
+    """Coordinate along head (dot product) of the torso section with the
+    least material, within around +- span; None if it is not clearly
+    narrower (< 85 %) than the median section there."""
+    step = art._bu(0.5)
+    n = int(span / step)
+    if n < 2:
+        return None
+    width_dir = Vector((0.0, 0.0, 0.0))
+    width_dir[wi] = 1.0
+    areas = []
+    for k in range(-n, n + 1):
+        s_val = around + k * step
+        total = 0.0
+        z = belly + art._bu(0.5)
+        while z < top:
+            origin = Vector((0.0, 0.0, z))
+            origin[li] = s_val * head[li]
+            origin[wi] = centre_w - art._bu(200.0)
+            hits = art._ray_hits(tree, origin, width_dir)
+            total += sum(hits[i + 1] - hits[i] for i in range(0, len(hits) - 1, 2))
+            z += art._bu(1.0)
+        areas.append((total, s_val))
+    ordered = sorted(a for a, _ in areas)
+    median = ordered[len(ordered) // 2]
+    best = min(areas)
+    if median <= 0 or best[0] > 0.85 * median:
+        return None
+    return best[1]
 
 
 def plan_from_template(target: str, template_name: str | None = None, options: dict | None = None) -> dict:
@@ -465,21 +503,34 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
             rear_end = max(rear_end, Vector(art._vec_mm(tail["cut"]["point"], "tail")).dot(head))
         waist_rel = template["waist"]["position_from_rear_rel"]
         waist_s = rear_end + waist_rel * (chest - rear_end)
+        # Follow a crease the sculpt already has there (a sculpted waist seam
+        # or fold): the narrowest section within +-12 % of the torso length.
+        seam = _narrowest_section(tree, head, li, wi, centre_w, belly, top,
+                                  waist_s, 0.12 * (chest - rear_end))
+        if seam is not None and abs(seam - waist_s) > art._bu(0.5):
+            notes.append(
+                f"waist moved {art._to_mm(abs(seam - waist_s))} mm to the model's own crease "
+                "(narrowest section near 52 %)"
+            )
+            waist_s = seam
         point = Vector((0.0, 0.0, 0.0))
         point[li] = waist_s * head[li]
         point[wi] = centre_w
-        run = None
-        probe = point.copy()
-        run = _vertical_run(tree, probe.x, probe.y, belly, floor)
-        z_mid = (run[0] + run[1]) / 2 if run else (belly + top) / 2
-        point.z = z_mid
         gap = _clamp(template["waist"]["gap_mm"], k)
         ball = _clamp(template["waist"]["ball_mm"], k)
         neck = _clamp(template["waist"]["neck_mm"], k)
         mouth = max(_clamp(template["waist"]["mouth_mm"], k), neck + 2 * clearance)
         mouth = min(mouth, ball - 0.4)
-        # Torso width at the waist: the ball needs walls on both sides.
-        widths = [v[wi] for v in verts if abs(v.dot(head) - waist_s) < art._bu(1.0) and run and run[0] <= v.z <= run[1]]
+        # The ball sits in the rear, a lip deep past the cut: measure the
+        # torso there (the cut itself may follow a deep crease).
+        depth = art._bu(ball / 2 + clearance + rules["min_wall_mm"] + 0.1)
+        pivot_s = waist_s - depth
+        probe = point.copy()
+        probe[li] = pivot_s * head[li]
+        run = _vertical_run(tree, probe.x, probe.y, belly, floor)
+        z_mid = (run[0] + run[1]) / 2 if run else (belly + top) / 2
+        point.z = z_mid
+        widths = [v[wi] for v in verts if abs(v.dot(head) - pivot_s) < art._bu(1.0) and run and run[0] <= v.z <= run[1]]
         torso_w = (max(widths) - min(widths)) * mm if widths else 0.0
         torso_h = (run[1] - run[0]) * mm if run else 0.0
         room = min(x for x in (torso_w, torso_h) if x) if (torso_w or torso_h) else 0.0
@@ -520,6 +571,7 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
                 # waist notch) so the lateral swing reaches its range.
                 "relief": bool(template["waist"].get("relief", True)),
                 "relief_radius_mm": round(max(torso_w, torso_h) * 0.75, 3) if (torso_w or torso_h) else None,
+                "search_mm": round(0.3 * min(x for x in (torso_w, torso_h) if x), 3) if (torso_w or torso_h) else None,
             }
         )
         # Built last: by then the legs hang from their halves, so the waist
@@ -540,6 +592,18 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
         span_in = float(legs_t["range_deg"].get("inward", 0.0))
         walk = str(options.get("leg_axis", "")).lower() == "walk"
         pivots_w = {}
+        # The body's own lowest point away from the legs: turned flat, every
+        # leg should meet the bed at this height, like the belly.
+        footprints = []
+        for lg in analysis["legs"]:
+            bx = lg.get("ball", {}).get("cutter")
+            if bx:
+                bc, bs = Vector(bx["center"]), Vector(bx["size"])
+                footprints.append((art._bu(bc.x - bs.x / 2), art._bu(bc.x + bs.x / 2),
+                                   art._bu(bc.y - bs.y / 2), art._bu(bc.y + bs.y / 2)))
+        free = [v.z for v in verts
+                if not any(x0 <= v.x <= x1 and y0 <= v.y <= y1 for x0, x1, y0, y1 in footprints)]
+        body_low = min(free) if free else None
         # Knuckles of a left/right pair leave a spine of spine_min_mm.
         spine_min = art._bu(legs_t.get("spine_min_mm", 2.4))
         spine_cap = {}
@@ -575,26 +639,36 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
                 notes.append(f"{label}: pin reduced to {dp} mm to keep 1.2 mm walls in a {width_mm:.1f} mm leg")
             side = 1.0 if label.endswith("right") else -1.0
             outward = width_vec * side
+            # How far the paw reaches inward from the leg's centre: turned
+            # flat for printing, that side faces the bed.
+            inner = radius
+            if not walk:
+                # Measured on the leg itself below the belly line.
+                if existing:
+                    lb = art._world_bm(art._part(leg["part"]))
+                    leg_pts = [v.co.copy() for v in lb.verts if v.co.z < z_cut]
+                    lb.free()
+                else:
+                    bc, bs = Vector(box["center"]), Vector(box["size"])
+                    lo_b = Vector([art._bu(bc[i] - bs[i] / 2) for i in range(3)])
+                    hi_b = Vector([art._bu(bc[i] + bs[i] / 2) for i in range(3)])
+                    leg_pts = [v for v in verts if lo_b.x <= v.x <= hi_b.x and lo_b.y <= v.y <= hi_b.y and v.z < z_cut]
+                if leg_pts:
+                    inner = max(radius, max(-side * (v[wi] - foot[wi]) for v in leg_pts))
             if rule == "belly_plus_half_thickness":
                 # Review standard: the pivot sits T/2 above the belly line, so
                 # the leg turned flat (print pose) lies on the bed with the
                 # belly, and the arch it needs stops at belly + T + clearance.
-                pz = z_cut + radius
+                # A paw wider than the leg lifts the pivot by the difference,
+                # so it still meets the bed with the belly.
+                pz = max(z_cut, body_low if body_low is not None else z_cut) + max(radius, inner)
             else:
                 pz = max(pivot_z, z_cut + radius * 0.5)
             pivot = foot.copy()
             pivot.z = pz
-            if existing:
-                found = _pivot_in_part(leg["part"], pz, dp, c)
-                if found is None:
-                    notes.append(f"{label}: no point inside {leg['part']} thick enough for a pin; skipped")
-                    continue
-                pivot, thick = found
-                if thick < art._bu(dp / 2 + clearance + 1.0):
-                    dp = round(max(legs_t["pin_mm"]["min"], 2 * (thick * mm - clearance - 1.0)), 3)
-                    notes.append(f"{label}: pin {dp} mm to fit the part at the pivot")
-                pz = pivot.z
-            elif not walk:
+            # A leg that is already a separate part is trimmed to the same
+            # standard knuckle below (its hidden top above it is dropped).
+            if not walk:
                 # Keep the thigh cap closed above the arch: the knuckle stays
                 # min_wall + clearance + 0.5 mm inside the outer surface.
                 hits = art._ray_hits(tree, pivot, outward)
@@ -612,6 +686,9 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
                                 f"{art._to_mm(radius)}) to keep a {rules['min_wall_mm']} mm thigh cap"
                             )
                             radius = room
+                            if rule == "belly_plus_half_thickness":
+                                pz = max(z_cut, body_low if body_low is not None else z_cut) + max(radius, inner)
+                                pivot.z = pz
             cap = spine_cap.get("front" if label.startswith("leg_front") else "rear")
             if not existing and cap is not None and radius > cap:
                 if cap < art._bu(dp) / 2 + c + art._bu(rules["min_wall_mm"]):
@@ -623,7 +700,7 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
                     )
                     radius = cap
                     if rule == "belly_plus_half_thickness":
-                        pz = z_cut + radius
+                        pz = max(z_cut, body_low if body_low is not None else z_cut) + max(radius, inner)
                         pivot.z = pz
             pivots_w[label] = (pivot[wi], radius)
             turn = axis.cross(-up)
@@ -639,41 +716,56 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
             parent = front
             if waist_l is not None:
                 parent = front if foot.dot(head) > waist_l else rear
-            child = leg["part"] if existing else f"{target}_{label}"
+            child = f"{target}_{label}"
+            source = leg["part"] if existing else parent
             if existing:
-                notes.append(f"{label}: already a separate part ({child}); joined as it is (no cut)")
-            else:
-                thickness = 2 * radius
-                # The conical ends of the knuckle must keep a ring of
-                # material around the pin hole.
-                chamfer = max(0.0, min(chamfer_rel * min(along, thickness),
-                                       radius - (art._bu(dp) / 2 + c + art._bu(0.6))))
-                column_start = pivot.copy()
-                column_start.z = z_cut - art._bu(0.5)
-                knuckle_a = pivot - axis * (along / 2)
-                knuckle_b = pivot + axis * (along / 2)
-                steps.append(
-                    {
-                        "op": "cut", "id": label, "part": parent, "new_part_name": child, "gap_mm": clearance,
-                        "drop_shells_under_mm3": drop_mm3,
-                        "cutter": {
-                            "type": "union",
-                            "parts": [
-                                dict(box),
-                                {"type": "prism", "start": art._point_mm(column_start),
-                                 "end": art._point_mm(pivot),
-                                 "width": round(along * mm, 3),
-                                 # A hair thinner than the knuckle: its top face lies
-                                 # wholly inside the turned top (no sliver faces).
-                                 "thickness": round(0.97 * thickness * mm, 3),
-                                 "chamfer": round(chamfer * mm, 3), "width_axis": [round(x, 6) for x in axis]},
-                                {"type": "revolution", "start": art._point_mm(knuckle_a),
-                                 "end": art._point_mm(knuckle_b), "radius": round(radius * mm, 3),
-                                 "chamfer": round(chamfer * mm, 3)},
-                            ],
-                        },
-                    }
+                notes.append(
+                    f"{label}: already a separate part ({source}); trimmed to the standard knuckle "
+                    "(its hidden top above the knuckle is dropped)"
                 )
+            thickness = 2 * radius
+            # The conical ends of the knuckle must keep a ring of
+            # material around the pin hole.
+            chamfer = max(0.0, min(chamfer_rel * min(along, thickness),
+                                   radius - (art._bu(dp) / 2 + c + art._bu(0.6))))
+            column_start = pivot.copy()
+            column_start.z = z_cut - art._bu(0.5)
+            knuckle_a = pivot - axis * (along / 2)
+            knuckle_b = pivot + axis * (along / 2)
+            if box is None:
+                # A separate leg: the box under its knuckle covers its
+                # whole lower part.
+                obj_l = art._part(source)
+                lo_l, hi_l = _bbox([obj_l])
+                box = {"type": "box",
+                       "center": art._point_mm(Vector(((lo_l.x + hi_l.x) / 2, (lo_l.y + hi_l.y) / 2,
+                                                       (lo_l.z - art._bu(1.0) + z_cut) / 2))),
+                       "size": [round((hi_l.x - lo_l.x + art._bu(2.0)) * mm, 3),
+                                round((hi_l.y - lo_l.y + art._bu(2.0)) * mm, 3),
+                                round((z_cut - lo_l.z + art._bu(1.0)) * mm, 3)]}
+            steps.append(
+                {
+                    "op": "cut", "id": label, "part": source, "new_part_name": child, "gap_mm": clearance,
+                    "drop_shells_under_mm3": drop_mm3, "discard_rest": bool(existing),
+                    "cutter": {
+                        "type": "union",
+                        "parts": [
+                            dict(box),
+                            {"type": "prism", "start": art._point_mm(column_start),
+                             "end": art._point_mm(pivot),
+                             "width": round(along * mm, 3),
+                             # A hair thinner than the knuckle: its top face lies
+                             # wholly inside the turned top (no sliver faces).
+                             "thickness": round(0.97 * thickness * mm, 3),
+                             "chamfer": round(chamfer * mm, 3), "width_axis": [round(x, 6) for x in axis],
+                             "fill": True},
+                            {"type": "revolution", "start": art._point_mm(knuckle_a),
+                             "end": art._point_mm(knuckle_b), "radius": round(radius * mm, 3),
+                             "chamfer": round(chamfer * mm, 3), "fill": True},
+                        ],
+                    },
+                }
+            )
             reach = (pz - floor) + max(art._bu(leg["column_size_mm"][analysis["length_axis"]]), across) + art._bu(3.0)
             steps.append(
                 {
@@ -682,6 +774,8 @@ def plan_from_template(target: str, template_name: str | None = None, options: d
                     "clearance_mm": clearance, "range_deg": rng, "relief": True, "role": "leg",
                     "relief_radius_mm": round(reach * mm, 3), "pin_flat_mm": flat,
                     "hole_tip": [round(x, 6) for x in tip], "embed_mm": round(embed, 3),
+                    # Legs next to the waist sweep past the other half too.
+                    "relief_also": [h for h in (front, rear) if h != parent and waist_l is not None],
                 }
             )
             table.append(

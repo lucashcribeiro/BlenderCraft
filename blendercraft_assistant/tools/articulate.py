@@ -557,10 +557,16 @@ def _parse_cutter(spec, depth: int = 0) -> dict:
             raise ValueError("a union cutter cannot contain another union")
         if not isinstance(parts, list) or not 1 <= len(parts) <= 8:
             raise ValueError("union cutter needs parts: a list of 1 to 8 cutters")
-        return {"type": "union", "parts": [_parse_cutter(p, depth + 1) for p in parts]}
+        return {"type": "union", "parts": [_with_fill(_parse_cutter(p, depth + 1), p) for p in parts]}
     raise ValueError(
         f"Unknown cutter type {kind!r}: use plane, box, cylinder, sphere, prism, revolution or union"
     )
+
+
+def _with_fill(prim: dict, spec: dict) -> dict:
+    if spec.get("fill"):
+        prim["fill"] = True
+    return prim
 
 
 def _cutter_prims(cutter: dict) -> list[dict]:
@@ -617,6 +623,8 @@ def _cutter_to_mm(cutter: dict) -> dict:
             out["rotation_deg"] = [round(math.degrees(a), 4) for a in value.to_euler()]
         elif key in ("normal", "width_axis"):
             out[key] = [round(c, 6) for c in value]
+        elif key == "fill":
+            out[key] = bool(value)
         elif isinstance(value, Vector):
             out[key] = _point_mm(value)
         else:
@@ -671,9 +679,9 @@ def _component_volumes(bm) -> list[tuple[float, list]]:
     return out
 
 
-def _drop_slivers(obj, min_fraction: float = 1e-3) -> list[float]:
+def _drop_slivers(obj, min_fraction: float = 1e-3, max_mm3: float = 1.0) -> list[float]:
     """Remove boolean slivers (components under min_fraction of the part's
-    volume and under 1 mm³). Returns the dropped volumes in mm³."""
+    volume and under max_mm3). Returns the dropped volumes in mm³."""
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     try:
@@ -684,7 +692,7 @@ def _drop_slivers(obj, min_fraction: float = 1e-3) -> list[float]:
         mm3 = _mm() ** 3
         dropped, kill = [], set()
         for volume, faces in comps[1:]:
-            if volume < total * min_fraction and volume * mm3 < 1.0:
+            if volume < total * min_fraction and volume * mm3 < max_mm3:
                 dropped.append(round(volume * mm3, 4))
                 kill.update(faces)
         if kill:
@@ -1313,6 +1321,7 @@ def _figure_report(name, objs, lo, hi, cell, legs, areas, top, k_top, head_sign,
             "foot_center_mm": [_to_mm(cx), _to_mm(cy)],
             "leg_top_z_mm": _to_mm(leg["merge_z"]),
             "column_size_mm": {L: _to_mm(ext_l), W: _to_mm(ext_w)},
+            "foot_size_mm": {L: _to_mm(foot_l), W: _to_mm(foot_w)},
             "body_above_mm": _to_mm(space),
             "confidence": confidence,
         }
@@ -1440,8 +1449,34 @@ def _figure_report(name, objs, lo, hi, cell, legs, areas, top, k_top, head_sign,
 # ---------------------------------------------------------------- cut_part
 
 
+def _fill_child(child, fill_bms: list) -> str | None:
+    """Make the child solid inside the fill primitives: the sculpt's own
+    grooves and seams there (hidden inside the parent) would leave thin walls
+    around a pin hole. The fill is the convex hull of the child's piece in
+    those primitives, clipped to them, so it never reaches past the sculpt."""
+    region = fill_bms[0] if len(fill_bms) == 1 else _bm_boolean(fill_bms[0], "UNION", fill_bms[1:])
+    try:
+        whole = _world_bm(child)
+        piece = _bm_boolean(whole, "INTERSECT", [region])
+        whole.free()
+        if len(piece.verts) < 4:
+            piece.free()
+            return None
+        hull = _hull_bm([v.co for v in piece.verts])
+        piece.free()
+        solid = _bm_boolean(hull, "INTERSECT", [region])
+        hull.free()
+        _boolean(child, "UNION", [solid])
+        solid.free()
+        return "child made solid inside the fill primitives"
+    finally:
+        if region is not fill_bms[0]:
+            region.free()
+
+
 def cut_part(name: str, cutter: dict, new_part_name: str, gap_mm: float = 0.3,
-             allow_multiple_shells: bool = False, drop_shells_under_mm3: float = 0.0) -> dict:
+             allow_multiple_shells: bool = False, drop_shells_under_mm3: float = 0.0,
+             discard_rest: bool = False) -> dict:
     obj = _part(name)
     new_part_name = str(new_part_name).strip()
     if not new_part_name:
@@ -1456,6 +1491,7 @@ def cut_part(name: str, cutter: dict, new_part_name: str, gap_mm: float = 0.3,
     gap = _bu(gap_mm)
     snap = _Snapshot([obj])
     t0 = time.perf_counter()
+    fill_note = None
     try:
         child = _new_object_like(obj, new_part_name, obj.data.copy())
         snap.created.append(child)
@@ -1470,6 +1506,11 @@ def cut_part(name: str, cutter: dict, new_part_name: str, gap_mm: float = 0.3,
                 union.free()
             else:
                 t_child = _boolean(child, "INTERSECT", inner)
+            fill = [b for p, b in zip(prims, inner) if p.get("fill")]
+            if fill:
+                filled = _fill_child(child, fill)
+                if filled:
+                    fill_note = filled
             t_parent = _boolean(obj, "DIFFERENCE", outer)
         finally:
             for b in inner + outer:
@@ -1484,9 +1525,10 @@ def cut_part(name: str, cutter: dict, new_part_name: str, gap_mm: float = 0.3,
             dropped["child"] += _drop_islands(child, limit)
             dropped["parent"] += _drop_islands(obj, limit)
         report = {"parent": _shell_report(obj), "child": _shell_report(child)}
+        checked = {k: v for k, v in report.items() if not (discard_rest and k == "parent")}
         problems = [
-            f"{label} has {r['components']} shells" for label, r in report.items() if r["components"] != 1
-        ] + [f"{label} is not watertight" for label, r in report.items() if not r["manifold"]]
+            f"{label} has {r['components']} shells" for label, r in checked.items() if r["components"] != 1
+        ] + [f"{label} is not watertight" for label, r in checked.items() if not r["manifold"]]
         if problems and not allow_multiple_shells:
             volumes = {}
             for label, o in (("parent", obj), ("child", child)):
@@ -1509,12 +1551,23 @@ def cut_part(name: str, cutter: dict, new_part_name: str, gap_mm: float = 0.3,
         snap.restore()
         raise
     snap.discard()
+    parent_name = obj.name
+    if discard_rest:
+        # Keep only the new part (e.g. a separate leg trimmed to the standard
+        # knuckle): the rest of the original is removed.
+        mesh = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if mesh.users == 0:
+            bpy.data.meshes.remove(mesh)
+        report["parent"] = {"discarded": True}
+        parent_name = f"{parent_name} (discarded)"
     return {
-        "parent": obj.name,
+        "parent": parent_name,
         "child": child.name,
         "gap_mm": gap_mm,
-        "parts": {obj.name: report["parent"], child.name: report["child"]},
+        "parts": {parent_name: report["parent"], child.name: report["child"]},
         "dropped_slivers_mm3": dropped,
+        "filled": fill_note,
         "timings_s": {
             "child_boolean": round(t_child, 2),
             "parent_boolean": round(t_parent, 2),
@@ -1585,6 +1638,10 @@ def _relief_bm(child, parent, pivot, axis, clearance, range_deg, keep, rho_overr
         rho += clearance
         if rho_override:
             rho = rho_override
+        if not child.get("bc_cutter"):
+            # A part that was already separate has no cutter to describe it:
+            # relieve along all of it.
+            rho = max(rho, max((v.co - pivot).length for v in child_bm.verts) + clearance)
     finally:
         child_bm.free()
     ball = _sphere_bm(pivot, rho)
@@ -1624,7 +1681,10 @@ def _relief_bm(child, parent, pivot, axis, clearance, range_deg, keep, rho_overr
             else:
                 base = _hull_points([v.co for v in piece.verts])
                 grown = [p + o for p in base for o in offsets]
-                part = _swept_hull(grown, pivot, axis, range_deg)
+                # 2 deg past each end: the end poses (one is the print pose)
+                # keep the full clearance, not just the sampled hull.
+                lo, hi = range_deg if isinstance(range_deg, tuple) else (-range_deg, range_deg)
+                part = _swept_hull(grown, pivot, axis, (lo - 2.0 if lo < 0 else lo, hi + 2.0 if hi > 0 else hi))
             if keep is not None:
                 spared = _bm_boolean(part, "DIFFERENCE", [keep])
                 part.free()
@@ -1841,6 +1901,8 @@ def add_joint(
     pin_flat_mm: float | None = None,
     hole_tip=None,
     embed_mm: float | None = None,
+    search_mm: float | None = None,
+    relief_also=None,
 ) -> dict:
     joint_type = str(joint_type).lower()
     if joint_type not in _JOINT_TYPES:
@@ -1869,7 +1931,8 @@ def add_joint(
     timings: dict = {}
     built: dict = {}
     warnings: list[str] = []
-    snap = _Snapshot([parent_obj, child_obj])
+    also_objs = [_part(n) for n in (relief_also or []) if n not in (parent_obj.name, child_obj.name)]
+    snap = _Snapshot([parent_obj, child_obj] + also_objs)
     try:
         child_tree = _world_tree(child_obj)
         p_in_child = _inside(child_tree, p)
@@ -1929,11 +1992,21 @@ def add_joint(
                 t = time.perf_counter()
                 # The walls that anchor the pin, beyond both ends of the
                 # child along the axis, are spared by the relief.
-                cb = _world_bm(child_obj)
-                proj = [(v.co - p).dot(a) for v in cb.verts]
-                cb.free()
                 span = _bu(1000.0)
                 keep_r = dp / 2 + c + wall
+                # Spare the walls that anchor the pin: only beyond the ends of
+                # the child's knuckle (its material near the axis), so the
+                # child's own corners near the axis still get room to turn.
+                cb = _world_bm(child_obj)
+                proj = []
+                for v in cb.verts:
+                    r = v.co - p
+                    along_a = r.dot(a)
+                    if (r - a * along_a).length <= 2 * keep_r:
+                        proj.append(along_a)
+                cb.free()
+                if not proj:
+                    proj = [0.0]
                 keeps = [
                     _cylinder_bm(p + a * (max(proj) + c), p + a * span, keep_r),
                     _cylinder_bm(p - a * span, p + a * (min(proj) - c), keep_r),
@@ -1945,6 +2018,9 @@ def add_joint(
                 keep.free()
                 if reliefs:
                     _boolean(parent_obj, "DIFFERENCE", reliefs)
+                    for other in also_objs:
+                        _boolean(other, "DIFFERENCE", reliefs)
+                        _drop_slivers(other, 5e-4, 20.0)
                     for b in reliefs:
                         b.free()
                     built["relief_radius_mm"] = _to_mm(rho)
@@ -2027,14 +2103,49 @@ def add_joint(
                     "(the ball sits in a socket in the parent and a neck joins it "
                     "to the child)"
                 )
-            max_r0 = d_child - 3 * c - wall
             # Room around the socket away from the child (other cuts, the
             # outside): the socket keeps a min_wall everywhere.
             parent_tree0 = _world_tree(parent_obj)
-            room = min(
-                (h[0] for h in (_ray_hits(parent_tree0, p, d) for d in _sphere_dirs(120) if d.dot(u) < 0.5) if h),
-                default=None,
-            )
+            dirs = _sphere_dirs(800)
+
+            def room_at(q):
+                return min((h[0] for h in (_ray_hits(parent_tree0, q, d) for d in dirs) if h), default=None)
+
+            room = room_at(p)
+            if search_mm:
+                # Move the pivot (keeping its depth) to where the socket has
+                # the most room: away from pockets and the outer surface.
+                # Closest spot where the wanted ball fits; else the roomiest.
+                want = (_bu(size_mm) / 2 if size_mm is not None else _bu(3.0)) + c + wall + _bu(0.1)
+                best = (room or 0.0, 0.0, p)
+                fits = (room or 0.0) >= want
+                reach = _bu(_number(search_mm, "search_mm", 0.0))
+                plane = _perpendicular_dirs(u, 8)
+                for ring in range(1, 7):
+                    if fits:
+                        break
+                    for o in plane:
+                        q = p + o * (reach * ring / 6)
+                        if not _inside(parent_tree0, q) or _inside(child_tree, q):
+                            continue
+                        r_q = room_at(q)
+                        if r_q is None:
+                            continue
+                        if r_q >= want and (not fits or r_q > best[0]):
+                            best, fits = (r_q, (q - p).length, q), True
+                        elif not fits and r_q > best[0] + _bu(0.05):
+                            best = (r_q, (q - p).length, q)
+                if best[2] is not p:
+                    warnings.append(
+                        f"ball pivot moved {_to_mm(best[1])} mm to give the socket "
+                        f"{_to_mm(best[0])} mm of room (was {_to_mm(room or 0.0)})"
+                    )
+                    p = best[2]
+                    room = best[0]
+                    near = child_tree.find_nearest(p)
+                    d_child = near[3]
+                    u = (Vector(near[0]) - p).normalized()
+            max_r0 = d_child - 3 * c - wall
             r0 = _bu(size_mm) / 2 if size_mm is not None else min(_bu(6.0), max_r0)
             if room is not None and r0 + c + wall + _bu(0.1) > room:
                 fit = room - c - wall - _bu(0.1)
@@ -2157,7 +2268,8 @@ def add_joint(
             check_radius = radius + _bu(3.0)
 
         for obj in (parent_obj, child_obj):
-            dropped = _drop_slivers(obj)
+            # Joint cuts through a sculpt can free crumbs where it was thin.
+            dropped = _drop_slivers(obj, 5e-4, 20.0)
             if dropped:
                 warnings.append(f"removed slivers from {obj.name}: {dropped} mm³")
         test_radius = max(check_radius, rho_set or 0.0, built_rho or 0.0) + _bu(5.0)
@@ -2637,9 +2749,10 @@ def articulate_figure(name: str, plan=None, dry_run: bool = False) -> dict:
             if op == "cut":
                 res = cut_part(step["part"], step["cutter"], step["new_part_name"],
                                step.get("gap_mm", 0.3), step.get("allow_multiple_shells", False),
-                               step.get("drop_shells_under_mm3", 0.0))
+                               step.get("drop_shells_under_mm3", 0.0), bool(step.get("discard_rest", False)))
                 brief = {"child": res["child"], "parts": {
-                    k: f"{v['components']} shell(s), manifold={v['manifold']}" for k, v in res["parts"].items()},
+                    k: ("discarded" if v.get("discarded") else f"{v['components']} shell(s), manifold={v['manifold']}")
+                    for k, v in res["parts"].items()},
                     "dropped_mm3": res["dropped_slivers_mm3"], "timings": res["timings_s"]}
             elif op == "joint":
                 res = add_joint(step["parent"], step["child"], step["type"], step["pivot"], step["axis"],
@@ -2647,7 +2760,8 @@ def articulate_figure(name: str, plan=None, dry_run: bool = False) -> dict:
                                 step.get("relief"), bool(step.get("test", True)),
                                 bool(step.get("make_pivot", True)), step.get("neck_mm"), step.get("mouth_mm"),
                                 step.get("relief_radius_mm"), step.get("role"), step.get("pin_flat_mm"),
-                                step.get("hole_tip"), step.get("embed_mm"))
+                                step.get("hole_tip"), step.get("embed_mm"), step.get("search_mm"),
+                                step.get("relief_also"))
                 sweep = res.get("sweep", {})
                 table.append(
                     {
@@ -2713,8 +2827,10 @@ _CUTTER_DOC = (
     "Cutter (mm, world): {type: plane, point, normal} keeps for the new part "
     "the side the normal points to; {type: box, center, size, rotation_deg?}; "
     "{type: cylinder, start, end, radius}; {type: sphere, center, radius}; "
-    "{type: union, parts: [...]} (e.g. a leg box plus a tab that goes up into "
-    "the body to hold a pin)."
+    "{type: prism, start, end, width, thickness, chamfer, width_axis} (octagonal "
+    "leg block); {type: revolution, start, end, radius, chamfer} (leg top turned "
+    "about the pin axis); {type: union, parts: [...]}. A part with fill: true "
+    "makes the new part solid inside it (closes the sculpt's grooves there)."
 )
 
 register_tool(
@@ -2813,6 +2929,7 @@ register_tool(
                 "gap_mm": {"type": "number"},
                 "allow_multiple_shells": {"type": "boolean"},
                 "drop_shells_under_mm3": {"type": "number"},
+                "discard_rest": {"type": "boolean", "description": "keep only the new part (trim a separate leg)"},
                 "description": {"type": "string"},
             },
             "required": ["name", "cutter", "new_part_name"],
@@ -2821,6 +2938,7 @@ register_tool(
             lambda a: cut_part(
                 str(a["name"]), a["cutter"], str(a["new_part_name"]), a.get("gap_mm", 0.3),
                 bool(a.get("allow_multiple_shells", False)), a.get("drop_shells_under_mm3", 0.0),
+                bool(a.get("discard_rest", False)),
             )
         ),
         kind="scene",
@@ -2875,6 +2993,9 @@ register_tool(
                 "pin_flat_mm": {"type": "number", "description": "pin: flat underside this deep (0.2 at 35 mm)"},
                 "hole_tip": {**_POINT, "description": "pin: teardrop hole, 45 deg tip toward this direction"},
                 "embed_mm": {"type": "number", "description": "pin: depth in each wall (default 1.5, min 1.2)"},
+                "search_mm": {"type": "number", "description": "ball: look this far around the pivot for the spot with most room"},
+                "relief_also": {"type": "array", "items": {"type": "string"},
+                                "description": "pin: other parts the turning child passes near (e.g. the other body half)"},
                 "description": {"type": "string"},
             },
             "required": ["parent", "child", "type", "pivot", "axis"],
@@ -2885,7 +3006,8 @@ register_tool(
                 a.get("size_mm"), a.get("clearance_mm", 0.30), a.get("range_deg"),
                 a.get("relief"), bool(a.get("test", True)), bool(a.get("make_pivot", True)),
                 a.get("neck_mm"), a.get("mouth_mm"), a.get("relief_radius_mm"), a.get("role"),
-                a.get("pin_flat_mm"), a.get("hole_tip"), a.get("embed_mm"),
+                a.get("pin_flat_mm"), a.get("hole_tip"), a.get("embed_mm"), a.get("search_mm"),
+                a.get("relief_also"),
             )
         ),
         kind="scene",
