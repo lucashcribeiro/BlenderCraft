@@ -172,7 +172,7 @@ class Export3mfTest(IoTestBase):
     def test_3mf_structure(self):
         red = _cube("Red", 20.0, (1.0, 0.0, 0.0, 1.0))
         blue = _cube("Blue", 20.0, (0.0, 0.0, 1.0, 1.0), location=(50.0, 0.0, 0.0))
-        path = self.export("two.3mf", objects=["Red", "Blue"])
+        path = self.export("two.3mf", objects=["Red", "Blue"], group="objects")
 
         names, root = _read_3mf(path)
         self.assertEqual(
@@ -223,7 +223,7 @@ class Export3mfTest(IoTestBase):
         _cube("Plain", 10.0)
         # Linear 0.21586 is sRGB 0x80.
         _cube("Mid", 10.0, (0.21586, 0.21586, 0.21586, 1.0), location=(30.0, 0.0, 0.0))
-        path = self.export("c.3mf", objects=["Plain", "Mid"])
+        path = self.export("c.3mf", objects=["Plain", "Mid"], group="objects")
         _, root = _read_3mf(path)
         bases = root.findall(f"{CORE}resources/{CORE}basematerials/{CORE}base")
         self.assertEqual(
@@ -235,7 +235,7 @@ class Export3mfTest(IoTestBase):
         mat = obj.data.materials[0]
         bsdf = next(n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED")
         bsdf.inputs["Base Color"].default_value = (0.0, 1.0, 0.0, 1.0)
-        path = self.export("n.3mf", objects=["Node"])
+        path = self.export("n.3mf", objects=["Node"], group="objects")
         _, root = _read_3mf(path)
         (base,) = root.findall(f"{CORE}resources/{CORE}basematerials/{CORE}base")
         self.assertEqual(base.get("displaycolor"), "#00FF00")
@@ -248,7 +248,7 @@ class Export3mfTest(IoTestBase):
         bsdf = next(n for n in nodes if n.type == "BSDF_PRINCIPLED")
         rgb = nodes.new("ShaderNodeRGB")
         links.new(rgb.outputs["Color"], bsdf.inputs["Base Color"])
-        path = self.export("l.3mf", objects=["Linked"])
+        path = self.export("l.3mf", objects=["Linked"], group="objects")
         _, root = _read_3mf(path)
         (base,) = root.findall(f"{CORE}resources/{CORE}basematerials/{CORE}base")
         self.assertEqual(base.get("displaycolor"), "#FF0000")
@@ -256,7 +256,7 @@ class Export3mfTest(IoTestBase):
     def test_3mf_applies_modifiers(self):
         obj = _cube("Mod", 20.0)
         obj.modifiers.new("Array", "ARRAY").count = 2
-        path = self.export("m.3mf", objects=["Mod"])
+        path = self.export("m.3mf", objects=["Mod"], group="objects")
         _, root = _read_3mf(path)
         (obj_el,) = root.findall(f"{CORE}resources/{CORE}object")
         self.assertEqual(len(obj_el.findall(f".//{CORE}triangle")), 24)
@@ -264,7 +264,7 @@ class Export3mfTest(IoTestBase):
     def test_3mf_mirrored_object_keeps_outward_winding(self):
         obj = _cube("Mirror", 20.0)
         obj.scale.x = -1.0
-        path = self.export("mir.3mf", objects=["Mirror"])
+        path = self.export("mir.3mf", objects=["Mirror"], group="objects")
         _, root = _read_3mf(path)
         obj_el = root.find(f"{CORE}resources/{CORE}object")
         verts = _mesh_vertices(obj_el)
@@ -283,7 +283,7 @@ class Export3mfTest(IoTestBase):
         scene.unit_settings.system = "METRIC"
         scene.unit_settings.scale_length = 1.0
         _cube("Small", 0.02)
-        path = self.export("s.3mf", objects=["Small"])
+        path = self.export("s.3mf", objects=["Small"], group="objects")
         _, root = _read_3mf(path)
         self.assertEqual(root.get("unit"), "millimeter")
         verts = _mesh_vertices(root.find(f"{CORE}resources/{CORE}object"))

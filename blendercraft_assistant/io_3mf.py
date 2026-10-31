@@ -1,8 +1,11 @@
 """3MF reader and writer.
 
-Exports follow the core spec, one mesh object per item, always in
-millimeters: vertices are converted from Blender units with ``mm_per_bu`` and
-the model declares ``unit="millimeter"``.
+Exports are always in millimeters: vertices are converted from Blender units
+with ``mm_per_bu`` and the model declares ``unit="millimeter"``. Two layouts:
+``export_3mf`` follows the core spec, one mesh object per item;
+``export_3mf_pieces`` writes one object per print piece the way Bambu Studio
+does (components into 3D/Objects/*.model plus Metadata/model_settings.config
+naming the parts and their extruders).
 
 The reader also understands the Production extension (components that point
 into other model parts of the package with ``p:path``, as Bambu Studio and
@@ -14,6 +17,7 @@ millions of triangles import without building an XML tree.
 import json
 import posixpath
 import re
+import uuid
 import zipfile
 from array import array
 from xml.etree import ElementTree as ET
@@ -124,7 +128,9 @@ def _xml_bytes(root: ET.Element) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
-def export_3mf(path: str, objects: list, mm_per_bu: float) -> list[str]:
+def export_3mf(
+    path: str, objects: list, mm_per_bu: float, meshes: dict | None = None
+) -> list[str]:
     """Write mesh objects to a 3MF file in millimeters.
 
     Meshes are evaluated (modifiers applied), triangulated, placed in world
@@ -133,6 +139,8 @@ def export_3mf(path: str, objects: list, mm_per_bu: float) -> list[str]:
     Objects without faces are skipped. Returns the names actually written.
     The result is plain core-spec 3MF, which Bambu Studio and PrusaSlicer open
     directly (named objects, one color each, items marked printable).
+    ``meshes`` optionally holds already evaluated meshes (name -> (vertices in
+    mm, triangles)), as made by export_check.mesh_cache.
     """
     model = ET.Element(
         "model",
@@ -152,7 +160,10 @@ def export_3mf(path: str, objects: list, mm_per_bu: float) -> list[str]:
     bpy.context.view_layer.update()
     written_names: list[str] = []
     for obj in objects:
-        verts, tris = _triangulated_world_mesh(obj, mm_per_bu)
+        if meshes is not None and obj.name in meshes:
+            verts, tris = meshes[obj.name]
+        else:
+            verts, tris = _triangulated_world_mesh(obj, mm_per_bu)
         if not tris:
             continue
         ET.SubElement(
@@ -215,6 +226,262 @@ def export_3mf(path: str, objects: list, mm_per_bu: float) -> list[str]:
         zf.writestr("_rels/.rels", _xml_bytes(rels))
         zf.writestr(_MODEL_PATH, _xml_bytes(model))
     return written_names
+
+
+# --- Export, Bambu Studio layout (one object per print piece) ----------------
+
+PROD_NS = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+BAMBU_NS = "http://schemas.bambulab.com/package/2021"
+_OBJECTS_DIR = "3D/Objects"
+_MODEL_RELS_PATH = "3D/_rels/3dmodel.model.rels"
+
+
+def _bambu_model() -> ET.Element:
+    """A ``<model>`` root with the namespaces Bambu Studio writes."""
+    model = ET.Element(
+        "model",
+        {
+            "unit": "millimeter",
+            "{http://www.w3.org/XML/1998/namespace}lang": "en-US",
+            "xmlns": CORE_NS,
+            "xmlns:BambuStudio": BAMBU_NS,
+            "xmlns:p": PROD_NS,
+            "requiredextensions": "p",
+        },
+    )
+    return model
+
+
+def _uuid() -> str:
+    return str(uuid.uuid4())
+
+
+def _translation(offset) -> str:
+    """3MF transform (row vectors) of a pure translation."""
+    x, y, z = (_num(float(c)) for c in offset)
+    return f"1 0 0 0 1 0 0 0 1 {x} {y} {z}"
+
+
+def _bambu_matrix(offset) -> str:
+    """Bambu's ``matrix`` metadata (row-major 4x4) of a pure translation."""
+    x, y, z = (_num(float(c)) for c in offset)
+    return f"1 0 0 {x} 0 1 0 {y} 0 0 1 {z} 0 0 0 1"
+
+
+def _add_mesh(parent: ET.Element, verts, tris) -> None:
+    mesh_el = ET.SubElement(parent, "mesh")
+    verts_el = ET.SubElement(mesh_el, "vertices")
+    for x, y, z in verts:
+        ET.SubElement(verts_el, "vertex", x=_num(x), y=_num(y), z=_num(z))
+    tris_el = ET.SubElement(mesh_el, "triangles")
+    for a, b, c in tris:
+        ET.SubElement(tris_el, "triangle", v1=str(a), v2=str(b), v3=str(c))
+
+
+def _meta(parent: ET.Element, key: str, value) -> None:
+    ET.SubElement(parent, "metadata", key=key, value=str(value))
+
+
+def export_3mf_pieces(
+    path: str, pieces: list, mm_per_bu: float, meshes: dict | None = None
+) -> list[dict]:
+    """Write one 3MF object per print piece, laid out like Bambu Studio does.
+
+    ``pieces`` is ``[(name, [objects])]``. Each piece becomes one object of
+    3D/3dmodel.model whose ``<components>`` point (Production extension,
+    ``p:path``) to one mesh object per part in 3D/Objects/object_<n>.model;
+    Metadata/model_settings.config names the object and its parts and gives
+    each part an extruder. Extruders follow the distinct part colours in order
+    of first appearance (all parts on extruder 1 when they share a colour).
+
+    Geometry is the evaluated world mesh in millimeters. As in Bambu's own
+    files each part mesh is centred on its bounding box, the component
+    transform (also the part's ``matrix``) moves it into the piece, and the
+    build item moves the piece (centred on its box) to its world position, so
+    the assembled positions are kept. Parts without faces are skipped, and so
+    are pieces left empty. Returns ``[{name, parts: [{name, extruder,
+    color}]}]`` of what was written.
+    """
+    bpy.context.view_layer.update()
+    planned = []
+    for name, objs in pieces:
+        parts = []
+        for obj in objs:
+            if meshes is not None and obj.name in meshes:
+                verts, tris = meshes[obj.name]
+            else:
+                verts, tris = _triangulated_world_mesh(obj, mm_per_bu)
+            if tris:
+                coords = np.asarray(verts, dtype=np.float64).reshape(-1, 3)
+                parts.append((obj, coords, tris, _object_color(obj)))
+        if parts:
+            planned.append((name, parts))
+    if not planned:
+        raise ValueError("No mesh with faces to export")
+
+    extruders: dict[str, int] = {}
+    for _, parts in planned:
+        for *_, color in parts:
+            extruders.setdefault(color, len(extruders) + 1)
+
+    model = _bambu_model()
+    # Metadata has to come before resources in the schema.
+    ET.SubElement(model, "metadata", name="Application").text = "BlenderCraft"
+    ET.SubElement(model, "metadata", name="BambuStudio:3mfVersion").text = "1"
+    resources = ET.SubElement(model, "resources")
+    build = ET.SubElement(model, "build", {"p:UUID": _uuid()})
+    config = ET.Element("config")
+    instances = []
+
+    sub_models: list[tuple[str, ET.Element]] = []
+    written = []
+    next_id = 1
+    for index, (name, parts) in enumerate(planned, start=1):
+        part_path = f"{_OBJECTS_DIR}/object_{index}.model"
+        lo = np.min([coords.min(axis=0) for _, coords, _, _ in parts], axis=0)
+        hi = np.max([coords.max(axis=0) for _, coords, _, _ in parts], axis=0)
+        center = (lo + hi) / 2
+
+        sub = _bambu_model()
+        ET.SubElement(sub, "metadata", name="BambuStudio:3mfVersion").text = "1"
+        sub_resources = ET.SubElement(sub, "resources")
+        group_id = next_id
+        next_id += 1
+        group = ET.SubElement(sub_resources, "basematerials", id=str(group_id))
+        components = []
+        for position, (obj, coords, tris, color) in enumerate(parts):
+            part_id = next_id
+            next_id += 1
+            ET.SubElement(group, "base", name=obj.name, displaycolor=color)
+            part_center = (coords.min(axis=0) + coords.max(axis=0)) / 2
+            part_el = ET.SubElement(
+                sub_resources,
+                "object",
+                {
+                    "id": str(part_id),
+                    "p:UUID": _uuid(),
+                    "type": "model",
+                    "name": obj.name,
+                    "pid": str(group_id),
+                    "pindex": str(position),
+                },
+            )
+            _add_mesh(part_el, (coords - part_center).tolist(), tris)
+            components.append((part_id, part_center - center, obj, tris, color))
+        sub_models.append((part_path, sub))
+
+        object_id = next_id
+        next_id += 1
+        top = ET.SubElement(
+            resources,
+            "object",
+            {"id": str(object_id), "p:UUID": _uuid(), "type": "model", "name": name},
+        )
+        comps_el = ET.SubElement(top, "components")
+        for part_id, offset, *_ in components:
+            ET.SubElement(
+                comps_el,
+                "component",
+                {
+                    "p:path": f"/{part_path}",
+                    "objectid": str(part_id),
+                    "p:UUID": _uuid(),
+                    "transform": _translation(offset),
+                },
+            )
+        item_transform = _translation(center)
+        ET.SubElement(
+            build,
+            "item",
+            {
+                "objectid": str(object_id),
+                "p:UUID": _uuid(),
+                "transform": item_transform,
+                "printable": "1",
+            },
+        )
+
+        first_extruder = extruders[components[0][4]]
+        obj_cfg = ET.SubElement(config, "object", id=str(object_id))
+        _meta(obj_cfg, "name", name)
+        _meta(obj_cfg, "extruder", first_extruder)
+        ET.SubElement(
+            obj_cfg, "metadata", face_count=str(sum(len(c[3]) for c in components))
+        )
+        summary = []
+        for part_id, offset, obj, tris, color in components:
+            part_cfg = ET.SubElement(
+                obj_cfg, "part", id=str(part_id), subtype="normal_part"
+            )
+            _meta(part_cfg, "name", obj.name)
+            _meta(part_cfg, "matrix", _bambu_matrix(offset))
+            _meta(part_cfg, "extruder", extruders[color])
+            ET.SubElement(
+                part_cfg,
+                "mesh_stat",
+                face_count=str(len(tris)),
+                edges_fixed="0",
+                degenerate_facets="0",
+                facets_removed="0",
+                facets_reversed="0",
+                backwards_edges="0",
+            )
+            summary.append(
+                {"name": obj.name, "extruder": extruders[color], "color": color}
+            )
+        instances.append((object_id, item_transform))
+        written.append({"name": name, "parts": summary})
+
+    plate = ET.SubElement(config, "plate")
+    _meta(plate, "plater_id", 1)
+    _meta(plate, "plater_name", "")
+    _meta(plate, "locked", "false")
+    for position, (object_id, _) in enumerate(instances):
+        instance = ET.SubElement(plate, "model_instance")
+        _meta(instance, "object_id", object_id)
+        _meta(instance, "instance_id", 0)
+        _meta(instance, "identify_id", 100 + position)
+    assemble = ET.SubElement(config, "assemble")
+    for object_id, transform in instances:
+        ET.SubElement(
+            assemble,
+            "assemble_item",
+            object_id=str(object_id),
+            instance_id="0",
+            transform=transform,
+            offset="0 0 0",
+        )
+
+    content_types = ET.Element("Types", {"xmlns": _CONTENT_TYPES_NS})
+    ET.SubElement(
+        content_types, "Default", Extension="rels", ContentType=_RELS_CONTENT_TYPE
+    )
+    ET.SubElement(
+        content_types, "Default", Extension="model", ContentType=_MODEL_CONTENT_TYPE
+    )
+    rels = ET.Element("Relationships", {"xmlns": _RELS_NS})
+    ET.SubElement(
+        rels, "Relationship", Target=f"/{_MODEL_PATH}", Id="rel-1", Type=_MODEL_REL_TYPE
+    )
+    model_rels = ET.Element("Relationships", {"xmlns": _RELS_NS})
+    for position, (part_path, _) in enumerate(sub_models, start=1):
+        ET.SubElement(
+            model_rels,
+            "Relationship",
+            Target=f"/{part_path}",
+            Id=f"rel-{position}",
+            Type=_MODEL_REL_TYPE,
+        )
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", _xml_bytes(content_types))
+        zf.writestr("_rels/.rels", _xml_bytes(rels))
+        zf.writestr(_MODEL_PATH, _xml_bytes(model))
+        zf.writestr(_MODEL_RELS_PATH, _xml_bytes(model_rels))
+        for part_path, sub in sub_models:
+            zf.writestr(part_path, _xml_bytes(sub))
+        zf.writestr(_BAMBU_SETTINGS, _xml_bytes(config))
+    return written
 
 
 def _model_path(zf: zipfile.ZipFile) -> str:

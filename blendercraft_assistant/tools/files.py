@@ -5,21 +5,25 @@ the scene's unit scale or display unit. Imports of the same formats assume
 the file is in millimeters (3MF and SolidCraft .sc declare their own unit).
 """
 
+import json
 from contextlib import contextmanager
 from pathlib import Path
 
 import bpy
 from mathutils import Matrix
 
-from ..io_3mf import export_3mf, import_3mf
+from .. import export_check
+from ..io_3mf import import_3mf
 from ..io_solidcraft import import_sc
 from ..units import mm_per_bu
 from . import paths
-from .base import Tool, json_result, register_tool
+from .base import Tool, ToolResult, json_result, register_tool
 from .inspect import _get_object
 
 IMPORT_EXTENSIONS = (".stl", ".obj", ".ply", ".glb", ".gltf", ".3mf", ".sc")
 EXPORT_FORMATS = ("stl", "obj", "ply", "glb", "gltf", "3mf")
+# Formats for slicers: checked (helpers left out, overlaps reported) first.
+PRINT_FORMATS = ("3mf", "stl")
 
 
 def _path(args: dict) -> Path:
@@ -114,14 +118,17 @@ def _scaled_root(objs: list, scale: float):
         bpy.context.view_layer.update()
 
 
-def _export_objects(args: dict) -> list:
+def _requested_objects(args: dict) -> list:
     names = args.get("objects")
     if names:
-        objs = [_get_object(str(n)) for n in names]
-    else:
-        objs = [o for o in bpy.context.view_layer.objects if o.select_get()]
-        if not objs:
-            raise ValueError("No 'objects' given and nothing is selected")
+        return [_get_object(str(n)) for n in names]
+    objs = [o for o in bpy.context.view_layer.objects if o.select_get()]
+    if not objs:
+        raise ValueError("No 'objects' given and nothing is selected")
+    return objs
+
+
+def _check_exportable(objs: list) -> list:
     in_layer = bpy.context.view_layer.objects
     for o in objs:
         if in_layer.get(o.name) is not o:
@@ -196,45 +203,83 @@ def _export_gltf(fmt: str, filepath: str, objs: list, mm: float) -> None:
         )
 
 
+def _print_options(args: dict) -> tuple[str, bool, bool]:
+    group = str(args.get("group") or "pieces").lower()
+    if group not in export_check.GROUPS:
+        raise ValueError(
+            f"Unknown group {group!r}; use one of: {', '.join(export_check.GROUPS)}"
+        )
+    return group, bool(args.get("strict")), bool(args.get("include_helpers"))
+
+
+def _pieces_summary(pieces: list[dict]) -> dict:
+    """Compact pieces for the tool result: part names and extruders per
+    piece, and the colour of each extruder (filaments[0] is extruder 1)."""
+    filaments: dict[int, str] = {}
+    out = []
+    for piece in pieces:
+        for part in piece["parts"]:
+            filaments[part["extruder"]] = part["color"]
+        out.append(
+            {
+                "name": piece["name"],
+                "parts": [p["name"] for p in piece["parts"]],
+                "extruders": [p["extruder"] for p in piece["parts"]],
+            }
+        )
+    return {"pieces": out, "filaments": [filaments[k] for k in sorted(filaments)]}
+
+
 def _export_file(args: dict):
     # Bases of just-added or just-removed objects are stale until an update.
     bpy.context.view_layer.update()
     path = _path(args)
     fmt = _format(args, path, EXPORT_FORMATS)
-    objs = _export_objects(args)
+    objs = _requested_objects(args)
     scene = bpy.context.scene
     mm = mm_per_bu(scene)
     skipped = []
-    if fmt == "3mf":
-        skipped = [
-            {"name": o.name, "reason": "not a mesh"} for o in objs if o.type != "MESH"
-        ]
-        meshes = [o for o in objs if o.type == "MESH"]
-        if not meshes:
-            raise ValueError("3MF export needs at least one mesh object")
+    data_extra = {}
+    if fmt in PRINT_FORMATS:
+        group, strict, include_helpers = _print_options(args)
+        if fmt == "stl":
+            group = "objects"  # one mesh soup: every overlap matters
+        prepared = export_check.prepare(
+            objs, mm, group, include_helpers, accept=_check_exportable
+        )
+        export_check.refuse_if_strict(prepared.report, strict)
+        skipped = prepared.skipped
         path.parent.mkdir(parents=True, exist_ok=True)
-        written = export_3mf(str(path), meshes, mm)
-        skipped += [
-            {"name": o.name, "reason": "no faces"}
-            for o in meshes
-            if o.name not in written
-        ]
-        objs = [o for o in meshes if o.name in written]
+        if fmt == "stl":
+            _export_with_operator(fmt, path, prepared.meshes, mm)
+        else:
+            pieces = export_check.write_3mf(str(path), prepared, mm)
+            if pieces is not None:
+                data_extra.update(_pieces_summary(pieces))
+        objs = prepared.meshes
+        data_extra = {"check": prepared.report.to_dict(), **data_extra}
     else:
+        _check_exportable(objs)
         path.parent.mkdir(parents=True, exist_ok=True)
         _export_with_operator(fmt, path, objs, mm)
     if not path.is_file():
         raise RuntimeError(f"Export produced no file: {path}")
+    # Long check reports first: the dispatcher truncates long results, so
+    # what the user must see comes before the object lists.
     data = {
         "path": str(path),
         "format": fmt,
+        **data_extra,
         "objects": [o.name for o in objs],
         "size_bytes": path.stat().st_size,
         "skipped": skipped,
         # The unit of the file's coordinates.
         "unit": "meter" if fmt in ("glb", "gltf") else "millimeter",
     }
-    return json_result(data)
+    if "check" not in data:
+        return json_result(data)
+    # Print exports carry a long report: compact JSON keeps it whole.
+    return ToolResult(text=json.dumps(data, ensure_ascii=False))
 
 
 def _import_with_operator(fmt: str, path: Path, mm: float) -> None:
@@ -333,7 +378,24 @@ register_tool(
             "Modifiers are applied. STL, OBJ, PLY and 3MF are always written "
             "in millimeters and glTF in meters (its specification), whatever "
             "the scene unit. Hidden objects are rejected. Selection and "
-            "active object are restored."
+            "active object are restored.\n"
+            "3MF and STL are checked for printing first: cutters and helpers "
+            "(collections BC_cutters/BC_backup/helpers, names BC_cut*, "
+            "BC_off*, BC_Pivo*, BC_plan*, *furo*, *cutter*, Boolean modifier "
+            "operands) are left out unless include_helpers is true; "
+            "overlapping parts (a slicer fuses them) and non-manifold meshes "
+            "are reported. ALWAYS show the result's check.report lines to "
+            "the user and say what to fix (e.g. boolean-union a ball or pin "
+            "into its host, subtract a hole). strict: true refuses to write "
+            "the file when separate pieces overlap.\n"
+            "3MF group: 'pieces' (default) writes one Bambu Studio object per "
+            "print piece with its parts inside (Production extension plus "
+            "Metadata/model_settings.config, one extruder per distinct "
+            "colour), keeping assembled positions. A piece is an object plus "
+            "its colour-insert children (pads, toes, eyes, or bc_role = "
+            "'insert'), or the objects sharing a 'bc_piece' custom property; "
+            "joint parts (ball, pin, cap) stay separate pieces. 'objects' "
+            "writes the old flat layout, one object per Blender object."
             + paths.RULE
         ),
         input_schema={
@@ -342,6 +404,19 @@ register_tool(
                 "path": {"type": "string"},
                 "objects": {"type": "array", "items": {"type": "string"}},
                 "format": {"type": "string"},
+                "group": {
+                    "type": "string",
+                    "enum": ["pieces", "objects"],
+                    "description": "3MF layout (default pieces).",
+                },
+                "strict": {
+                    "type": "boolean",
+                    "description": "3MF/STL: refuse to export when pieces overlap.",
+                },
+                "include_helpers": {
+                    "type": "boolean",
+                    "description": "3MF/STL: export cutters/helpers too (default false).",
+                },
             },
             "required": ["path"],
         },

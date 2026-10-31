@@ -9,10 +9,11 @@ STL needs nothing here: Blender's own STL importer reads 1 file unit as
 import os
 
 import bpy
-from bpy.props import CollectionProperty, StringProperty
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, StringProperty
 from bpy.types import FileHandler, Operator, OperatorFileListElement
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
+from .. import export_check
 from ..i18n import t
 from ..io_3mf import export_3mf, import_3mf
 from ..io_solidcraft import import_sc
@@ -29,8 +30,33 @@ def export_candidates(context) -> list:
     return [o for o in context.view_layer.objects if o.visible_get()]
 
 
+def export_print(
+    path: str,
+    objects: list,
+    mm: float,
+    group: str = "pieces",
+    strict: bool = False,
+    include_helpers: bool = False,
+):
+    """Check and write the visible meshes of objects as 3MF.
+
+    Helpers (cutters, pivots, backups) are left out unless include_helpers;
+    strict refuses (ExportRefused) when separate pieces overlap. Returns
+    export_check.Prepared plus the pieces written (None in the flat layout).
+    Raises ValueError when no mesh with faces is left to write.
+    """
+
+    def visible(objs):
+        return [o for o in objs if o.visible_get()]
+
+    prepared = export_check.prepare(objects, mm, group, include_helpers, accept=visible)
+    export_check.refuse_if_strict(prepared.report, strict)
+    pieces = export_check.write_3mf(path, prepared, mm)
+    return prepared, pieces
+
+
 def export_objects(path: str, objects: list, mm: float) -> tuple[list[str], list[str]]:
-    """Write the visible meshes of objects; return (written, skipped) names.
+    """Flat 3MF of the visible meshes of objects; return (written, skipped).
 
     Raises ValueError when no mesh with faces is left to write.
     """
@@ -148,18 +174,50 @@ class BC_OT_export_3mf(Operator, ExportHelper):
 
     filename_ext = ".3mf"
     filter_glob: StringProperty(default="*.3mf", options={"HIDDEN"})
+    group: EnumProperty(
+        name=t("export_group"),
+        items=(
+            ("PIECES", t("export_group_pieces"), t("export_group_pieces_desc")),
+            ("OBJECTS", t("export_group_objects"), t("export_group_objects_desc")),
+        ),
+        default="PIECES",
+    )
+    strict: BoolProperty(name=t("export_strict"), description=t("export_strict_desc"))
+    include_helpers: BoolProperty(
+        name=t("export_include_helpers"), description=t("export_include_helpers_desc")
+    )
 
     def execute(self, context):
         context.view_layer.update()
         try:
-            written, skipped = export_objects(
-                self.filepath, export_candidates(context), mm_per_bu(context.scene)
+            prepared, pieces = export_print(
+                self.filepath,
+                export_candidates(context),
+                mm_per_bu(context.scene),
+                group=self.group.lower(),
+                strict=self.strict,
+                include_helpers=self.include_helpers,
             )
         except (OSError, ValueError) as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        level = "WARNING" if skipped else "INFO"
-        self.report({level}, export_message(written, skipped, os.path.basename(self.filepath)))
+        filename = os.path.basename(self.filepath)
+        skipped = [s["name"] for s in prepared.skipped]
+        if pieces is not None:
+            message = t(
+                "exported_3mf_pieces",
+                n=len(pieces),
+                parts=sum(len(p["parts"]) for p in pieces),
+                file=filename,
+            )
+            if skipped:
+                message += " " + t("export_skipped", names=", ".join(skipped))
+        else:
+            message = export_message([o.name for o in prepared.meshes], skipped, filename)
+        report = prepared.report
+        notes = [] if report.lines() == [t("chk_ok")] else report.lines()
+        level = "WARNING" if skipped or notes else "INFO"
+        self.report({level}, "\n".join([message, *notes]))
         return {"FINISHED"}
 
 
